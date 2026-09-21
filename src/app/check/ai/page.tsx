@@ -1,111 +1,243 @@
 "use client";
 
-import { useState } from "react";
-import Header from "@/components/Header";
-import { CheckResult } from "@/components/CheckResult";
-import { CheckResponse } from "@/types/check";
-import { ArrowLeft } from "lucide-react";
+import { Suspense, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import Link from "next/link";
+import Header from "@/components/Header";
+import Footer from "@/components/Footer";
+import VerdictCard from "@/components/VerdictCard";
+import { SectionLabel } from "@/components/brand";
+import { toVerdict } from "@/lib/adapter";
+import type { CheckResponse, Verdict } from "@/types/check";
+import { ArrowLeft, ArrowRight, Bot, EyeOff, Loader2, ScanSearch, ShieldCheck, Zap } from "lucide-react";
 
-export default function AICheckPage() {
+const MAX = 5000;
+
+const EXAMPLES = [
+  {
+    label: "Leaked login",
+    text: "Hi AI, I can't log into my Gmail. My email is ravi.k@example.com and my password is Monsoon$42. The OTP I just received is 583921 — please help me recover my account.",
+  },
+  {
+    label: "Bank details",
+    text: "Can you explain these bank charges? My account number is 5012 3456 7890, my card is 4532 8871 0932 4451, and my phone is 98765 43210 in case you need it.",
+  },
+  {
+    label: "Everyday question",
+    text: "What's the best way to explain the water cycle to a 7-year-old for a school project?",
+  },
+];
+
+function AICheckInner() {
+  const params = useSearchParams();
   const [text, setText] = useState("");
-  const [result, setResult] = useState<CheckResponse | null>(null);
+  const [verdict, setVerdict] = useState<Verdict | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const resultRef = useRef<HTMLDivElement>(null);
+
+  // Prefill from the homepage console (?q=...)
+  useEffect(() => {
+    const q = params.get("q");
+    if (q) setText(q);
+  }, [params]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!text.trim()) return;
+    const value = text.trim();
+    if (!value || loading) return;
 
     setLoading(true);
     setError("");
-    setResult(null);
+    setVerdict(null);
 
     try {
       const res = await fetch("/api/check/ai", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ textContent: text }),
+        body: JSON.stringify({ textContent: value }),
       });
+      const data = await res.json();
 
       if (!res.ok) {
-        // Extract the specific error message from the API (e.g., "Text is too long")
-        const errData = await res.json();
-        throw new Error(errData.error || "Failed to check");
+        throw new Error(data.error || "Something went wrong while checking your prompt. Please try again.");
       }
-      
-      const data: CheckResponse = await res.json();
-      setResult(data);
-    } catch (err: any) {
-      setError(err.message || "Something went wrong while checking your prompt. Please try again.");
+      if (data.status === "ERROR") {
+        throw new Error("Something went wrong while checking this. Please try again.");
+      }
+
+      setVerdict(toVerdict(data as CheckResponse, value, "Ask AI check"));
+      setTimeout(() => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 60);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Something went wrong while checking your prompt. Please try again."
+      );
     } finally {
       setLoading(false);
     }
   }
 
+  const containsLink = /https?:\/\/|www\./i.test(text);
+
   return (
-    <div className="min-h-screen flex flex-col bg-slate-50">
-      <Header />
-      <main className="flex-1 max-w-3xl mx-auto w-full px-4 sm:px-6 py-8">
-        <Link href="/" className="inline-flex items-center gap-2 text-sm text-slate-600 hover:text-slate-900 mb-6">
-          <ArrowLeft className="w-4 h-4" /> Back to Home
-        </Link>
+    <section className="mx-auto w-full max-w-3xl px-4 pb-16 pt-10 sm:px-6 sm:pt-14">
+      <Link
+        href="/"
+        className="inline-flex items-center gap-1.5 text-sm font-semibold text-stone-500 transition-colors hover:text-stone-900"
+      >
+        <ArrowLeft size={15} /> FixMP home
+      </Link>
 
-        <h1 className="text-3xl font-bold text-slate-900 mb-2">AI Prompt Check</h1>
-        <p className="text-slate-600 mb-8">Paste the prompt you are about to send to ChatGPT, Gemini, or any other AI.</p>
+      <div className="mt-6">
+        <SectionLabel>Checkpoint 02 — Ask AI</SectionLabel>
+        <h1 className="mt-3 text-3xl font-extrabold leading-tight tracking-tight text-stone-900 sm:text-5xl">
+          WHAT ARE YOU ABOUT TO TELL A <span className="text-amber-600">CHATBOT?</span>
+        </h1>
+        <p className="mt-4 leading-relaxed text-stone-600">
+          Paste the exact prompt you&apos;re about to send to ChatGPT, Gemini, Claude or any other AI.
+          FixMP checks it for passwords, one-time codes, API keys and personal details — before it
+          leaves you.
+        </p>
+      </div>
 
-        <form onSubmit={handleSubmit} className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 mb-8">
-          <label htmlFor="prompt" className="block text-sm font-semibold text-slate-700 mb-2">
-            YOUR PROMPT
-          </label>
-          
-          <textarea
-            id="prompt"
-            rows={8}
-            maxLength={5000} // <-- HARD CLIENT-SIDE LIMIT
-            className="w-full p-4 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-base resize-none"
-            placeholder="e.g., Hi AI, I'm working on a secret project for my company Acme Corp. My email is john@acme.com and my AWS key is..."
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-          />
-          
-          {/* Character Counter */}
-          <div className="flex justify-between items-center mt-2">
-            <p className="text-xs text-slate-500">
-              {text.length > 4800 
-                ? "⚠️ Approaching maximum length limit." 
-                : "Max 5,000 characters to ensure fast, secure checking."}
-            </p>
-            <p className={`text-xs ${text.length > 4500 ? 'text-orange-600 font-bold' : 'text-slate-400'}`}>
-              {text.length} / 5000
-            </p>
-          </div>
+      {/* Trust strip */}
+      <div className="mt-5 flex flex-wrap gap-x-6 gap-y-2 font-mono text-[10px] uppercase tracking-[0.18em] text-stone-500">
+        <span className="flex items-center gap-1.5">
+          <ShieldCheck size={13} className="text-emerald-600" aria-hidden="true" /> No sign-up
+        </span>
+        <span className="flex items-center gap-1.5">
+          <EyeOff size={13} className="text-amber-600" aria-hidden="true" /> Nothing stored
+        </span>
+        <span className="flex items-center gap-1.5">
+          <Zap size={13} className="text-blue-600" aria-hidden="true" /> Result in seconds
+        </span>
+      </div>
 
-          <button
-            type="submit"
-            disabled={loading || !text.trim()}
-            className="mt-6 w-full h-12 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
+      {/* Input console */}
+      <form
+        onSubmit={handleSubmit}
+        className="mt-8 rounded-2xl border border-stone-200 bg-white p-5 shadow-xl shadow-stone-900/5 sm:p-7"
+      >
+        <div className="flex items-center justify-between gap-3">
+          <label
+            htmlFor="prompt"
+            className="font-mono text-[11px] font-bold uppercase tracking-[0.2em] text-stone-500"
           >
-            {loading ? (
-              <>
-                <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                </svg>
-                Checking...
-              </>
-            ) : "CHECK WITH FIXMP"}
-          </button>
-        </form>
+            Your prompt
+          </label>
+          <span
+            aria-hidden="true"
+            className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-100 text-blue-700"
+          >
+            <Bot size={18} />
+          </span>
+        </div>
 
-        {error && (
-          <div className="p-4 bg-red-50 text-red-700 rounded-lg border border-red-200 mb-8 text-sm">
-            {error}
+        <textarea
+          id="prompt"
+          rows={8}
+          maxLength={MAX}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder='e.g. "Hi AI, I locked myself out — my email is ravi@example.com, password is Monsoon$42 and the OTP I just received is 583921..."'
+          className="mt-3 w-full resize-y rounded-xl border border-stone-300 bg-stone-50 p-4 text-base leading-relaxed text-stone-900 transition-all placeholder:text-stone-400 focus:border-amber-500 focus:outline-none focus:ring-2 focus:ring-amber-500/25"
+        />
+
+        <div className="mt-2 flex items-center justify-between text-xs">
+          <p className={text.length > MAX * 0.9 ? "font-semibold text-amber-600" : "text-stone-400"}>
+            {text.length > MAX * 0.9
+              ? "Approaching the length limit"
+              : `${MAX.toLocaleString()} characters max`}
+          </p>
+          <p
+            className={`font-mono ${text.length > MAX * 0.9 ? "font-bold text-amber-600" : "text-stone-400"}`}
+          >
+            {text.length} / {MAX.toLocaleString()}
+          </p>
+        </div>
+
+        {/* Examples — doubles as test cases */}
+        <div className="mt-5 border-t border-stone-100 pt-5">
+          <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-stone-400">
+            Try an example (great for testing)
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {EXAMPLES.map((ex) => (
+              <button
+                key={ex.label}
+                type="button"
+                onClick={() => setText(ex.text)}
+                className="cursor-pointer rounded-full border border-stone-200 bg-stone-50 px-3.5 py-2 text-xs font-semibold text-stone-600 transition-all hover:border-amber-400 hover:text-amber-700 active:scale-95"
+              >
+                {ex.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <button
+          type="submit"
+          disabled={loading || !text.trim()}
+          className="mt-6 flex h-14 w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-stone-900 text-sm font-bold uppercase tracking-wider text-white shadow-sm transition-all hover:bg-stone-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-stone-300"
+        >
+          {loading ? (
+            <>
+              <Loader2 size={17} className="animate-spin" aria-hidden="true" />
+              Checking your prompt…
+            </>
+          ) : (
+            <>
+              Check with FixMP <ScanSearch size={17} aria-hidden="true" />
+            </>
+          )}
+        </button>
+
+        {containsLink && (
+          <p className="mt-4 flex flex-wrap items-center gap-1.5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-stone-700">
+            Your text contains a link. Want to
+            <Link href="/check/link" className="inline-flex items-center gap-1 font-bold text-amber-700 underline-offset-2 hover:underline">
+              run Click Check too <ArrowRight size={13} />
+            </Link>
+          </p>
+        )}
+      </form>
+
+      {error && (
+        <div role="alert" className="mt-6 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+          {error}
+        </div>
+      )}
+
+      <div ref={resultRef} className="scroll-mt-24">
+        {verdict && (
+          <div className="mt-8">
+            <VerdictCard verdict={verdict} onReset={() => { setVerdict(null); setError(""); }} />
           </div>
         )}
+      </div>
 
-        {result && <CheckResult result={result} />}
-      </main>
-    </div>
+      <p className="mt-10 text-center text-xs text-stone-400">
+        Curious what happens to your text?{" "}
+        <Link href="/how-it-works" className="font-semibold text-stone-500 underline-offset-2 hover:underline">
+          See how the check works
+        </Link>
+      </p>
+    </section>
+  );
+}
+
+export default function AICheckPage() {
+  return (
+    <Suspense fallback={null}>
+      <div className="flex min-h-screen flex-col">
+        <Header />
+        <main className="flex-1">
+          <AICheckInner />
+        </main>
+        <Footer />
+      </div>
+    </Suspense>
   );
 }

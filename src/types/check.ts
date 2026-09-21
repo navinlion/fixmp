@@ -1,38 +1,76 @@
-export type RiskLevel = "LOW" | "MEDIUM" | "HIGH";
+// ═══════════════════════════════════════════════════════════════
+// FIXMP result model — V2 (canonical) + V1 (legacy) compatibility
+//
+// CANONICAL (used by all redesigned UI):
+//   Severity, VerdictLevel, VerdictFinding, Verdict
+//
+// LEGACY (still produced by V1 API routes + services; kept so
+// check-engine, deterministic-checks, CheckResult and the
+// not-yet-redesigned pages keep compiling):
+//   RiskLevel, Finding, CheckRequest, CheckResponse
+// ═══════════════════════════════════════════════════════════════
+
+// ── Canonical ──────────────────────────────────────────────────
+export type Severity = "high" | "medium" | "low";
+export type VerdictLevel = "stop" | "review" | "clear";
+
+export interface VerdictFinding {
+  id: string;
+  category: string;
+  severity: Severity;
+  description: string;
+  evidence: string; // always masked — never the full value
+  action: string;
+  count?: number;
+}
+
+export interface Verdict {
+  tool: string;
+  original: string;
+  riskLevel: VerdictLevel;
+  statusText: string;
+  summary: string;
+  findings: VerdictFinding[];
+  dont: string; // 🚫
+  check: string; // ⚠️
+  do: string; // ✅
+  why: string; // 🔍
+  next: string; // ➡️
+  confidence: number;
+  limitations: string;
+  saferVersion?: string;
+  aiUsed?: boolean; // NEW
+}
+
+// ── Legacy (V1) ────────────────────────────────────────────────
+export type RiskLevel = "HIGH" | "MEDIUM" | "LOW";
 
 export interface Finding {
-  category: string; // e.g., "Phone Number", "API Key", "Location"
+  category: string;
   severity: RiskLevel;
-  description: string; // Plain English explanation for the user
-  evidence?: string; // The actual snippet found (masked if necessary)
-  recommendedAction: string; // e.g., "Blur this area", "Remove this text"
+  description: string;
+  evidence?: string;
+  recommendedAction: string;
+}
+
+export interface CheckRequest {
+  toolType: "AI" | "POST" | "PHOTO" | "LINK";
+  textContent?: string;
+  imageBase64?: string;
 }
 
 export interface CheckResponse {
-  status: "SUCCESS" | "ERROR";
+  status: string; // "SUCCESS" | "ERROR"
   riskLevel: RiskLevel;
-  summary: string; // e.g., "We found 2 things to check."
+  summary: string;
   findings: Finding[];
-  
-  // The core FixMP framework outputs
   dont: string;
   check: string;
   do: string;
   why: string;
   next: string;
-  
-  confidence: number; // 0.0 to 1.0
-  limitations: string; // e.g., "This check does not guarantee 100% safety."
-
-  // NEW LINE:
-  saferVersion?: string; 
+  confidence: number;
+  limitations: string;
+  saferVersion?: string;
+aiUsed?: boolean; // NEW — true only when Gemini actually processed this check
 }
-
-export interface CheckRequest {
-  toolType: "AI" | "POST" | "PHOTO" | "LINK" | "INFO" | "GENERAL";
-  textContent?: string;
-  imageBase64?: string;
-  imageUrl?: string; // For V1, we'll handle base64 or temporary URLs
-  urlToCheck?: string;
-}
-
