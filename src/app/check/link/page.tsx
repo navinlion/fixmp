@@ -1,112 +1,171 @@
 "use client";
 
-import { useState } from "react";
-import Header from "@/components/Header";
-import { CheckResult } from "@/components/CheckResult";
-import { CheckResponse } from "@/types/check";
-import { ArrowLeft, Link as LinkIcon } from "lucide-react";
+import { Suspense, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import Link from "next/link";
+import Header from "@/components/Header";
+import Footer from "@/components/Footer";
+import VerdictCard from "@/components/VerdictCard";
+import { SectionLabel } from "@/components/brand";
+import { toVerdict } from "@/lib/adapter";
+import type { CheckResponse, Verdict } from "@/types/check";
+import { ArrowLeft, EyeOff, Link2, Loader2, Server, ShieldCheck, Zap } from "lucide-react";
 
-export default function LinkCheckPage() {
+const EXAMPLES = [
+  { label: "Phishing lookalike", url: "http://paypa1-secure-login.tk/verify-account" },
+  { label: "Shortened link", url: "https://bit.ly/3xYzAbc" },
+  { label: "Normal site", url: "https://www.wikipedia.org" },
+];
+
+function LinkCheckInner() {
+  const params = useSearchParams();
   const [url, setUrl] = useState("");
-  const [result, setResult] = useState<CheckResponse | null>(null);
+  const [verdict, setVerdict] = useState<Verdict | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const resultRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const q = params.get("url");
+    if (q) setUrl(q); // homepage handoff — /check/link?url=...
+  }, [params]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!url.trim()) return;
-
-    // Basic client-side prep (add https if missing)
-    let checkUrl = url.trim();
-    if (!checkUrl.startsWith("http://") && !checkUrl.startsWith("https://")) {
-      checkUrl = "https://" + checkUrl;
-    }
+    if (!url.trim() || loading) return;
 
     setLoading(true);
     setError("");
-    setResult(null);
+    setVerdict(null);
 
     try {
       const res = await fetch("/api/check/link", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ urlToCheck: checkUrl }),
+        body: JSON.stringify({ urlToCheck: url.trim() }),
       });
+      const data = await res.json();
 
-      if (!res.ok) {
-        const err = await res.json();
-        // If it's a security block, we still want to show it as a result, not an error
-        if (res.status === 400 && err.riskLevel === "HIGH") {
-          setResult(err);
-          setLoading(false);
-          return;
-        }
-        throw new Error(err.error || "Failed to check link");
-      }
-      
-      const data: CheckResponse = await res.json();
-      setResult(data);
-    } catch (err: any) {
-      setError(err.message || "Something went wrong. Please try again.");
+      if (!res.ok) throw new Error(data.error || "Something went wrong while checking this link. Please try again.");
+
+      setVerdict(toVerdict(data as CheckResponse, url.trim(), "Link check"));
+      setTimeout(() => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 60);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong. Please try again.");
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <div className="min-h-screen flex flex-col bg-slate-50">
-      <Header />
-      <main className="flex-1 max-w-3xl mx-auto w-full px-4 sm:px-6 py-8">
-        <Link href="/" className="inline-flex items-center gap-2 text-sm text-slate-600 hover:text-slate-900 mb-6">
-          <ArrowLeft className="w-4 h-4" /> Back to Home
-        </Link>
+    <section className="mx-auto w-full max-w-3xl px-4 pb-16 pt-10 sm:px-6 sm:pt-14">
+      <Link href="/" className="inline-flex items-center gap-1.5 text-sm font-semibold text-stone-500 transition-colors hover:text-stone-900">
+        <ArrowLeft size={15} /> FixMP home
+      </Link>
 
-        <h1 className="text-3xl font-bold text-slate-900 mb-2">Link Check</h1>
-        <p className="text-slate-600 mb-8">Paste a URL to check for phishing, suspicious redirects, and security risks before you click.</p>
+      <div className="mt-6">
+        <SectionLabel>Checkpoint 03 — Click</SectionLabel>
+        <h1 className="mt-3 text-3xl font-extrabold leading-tight tracking-tight text-stone-900 sm:text-5xl">
+          CHECK A LINK BEFORE YOU <span className="text-amber-600">OPEN IT.</span>
+        </h1>
+        <p className="mt-4 leading-relaxed text-stone-600">
+          Paste the link someone sent you. FixMP checks it for lookalike domains, disguised
+          characters, hidden redirects and the patterns behind most phishing — before your tap does.
+        </p>
+      </div>
 
-        <form onSubmit={handleSubmit} className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 mb-8">
-          <label htmlFor="url-input" className="block text-sm font-semibold text-slate-700 mb-2">
-            URL TO CHECK
-          </label>
-          <div className="flex flex-col sm:flex-row gap-3">
-            <div className="relative flex-1">
-              <LinkIcon className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
-              <input
-                id="url-input"
-                type="text"
-                className="w-full h-12 pl-10 pr-4 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-base"
-                placeholder="example.com or https://..."
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-              />
-            </div>
-            <button
-              type="submit"
-              disabled={loading || !url.trim()}
-              className="h-12 px-8 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 whitespace-nowrap"
-            >
-              {loading ? (
-                <>
-                  <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
-                  Checking...
-                </>
-              ) : "CHECK LINK"}
-            </button>
+      {/* Trust strip */}
+      <div className="mt-5 flex flex-wrap gap-x-6 gap-y-2 font-mono text-[10px] uppercase tracking-[0.18em] text-stone-500">
+        <span className="flex items-center gap-1.5"><ShieldCheck size={13} className="text-emerald-600" aria-hidden="true" /> No sign-up</span>
+        <span className="flex items-center gap-1.5"><EyeOff size={13} className="text-amber-600" aria-hidden="true" /> Nothing stored</span>
+        <span className="flex items-center gap-1.5"><Zap size={13} className="text-blue-600" aria-hidden="true" /> Pattern checks in seconds</span>
+        <span className="flex items-center gap-1.5"><Server size={13} className="text-blue-600" aria-hidden="true" /> Site probed safely — never by your device</span>
+      </div>
+
+      {/* Input console */}
+      <form onSubmit={handleSubmit} className="mt-8 rounded-2xl border border-stone-200 bg-white p-5 shadow-xl shadow-stone-900/5 sm:p-7">
+        <label htmlFor="url-input" className="font-mono text-[11px] font-bold uppercase tracking-[0.2em] text-stone-500">
+          The link you were sent
+        </label>
+        <div className="mt-3 flex flex-col gap-3 sm:flex-row">
+          <div className="relative flex-1">
+            <Link2 size={17} className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-stone-400" aria-hidden="true" />
+            <input
+              id="url-input"
+              type="text"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="example.com or https://…"
+              autoComplete="off"
+              spellCheck={false}
+              className="h-14 w-full rounded-xl border border-stone-300 bg-stone-50 pl-11 pr-4 font-mono text-sm text-stone-900 transition-all placeholder:text-stone-400 focus:border-amber-500 focus:outline-none focus:ring-2 focus:ring-amber-500/25"
+            />
           </div>
-        </form>
+          <button
+            type="submit"
+            disabled={loading || !url.trim()}
+            className="flex h-14 cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-xl bg-stone-900 px-7 text-sm font-bold uppercase tracking-wider text-white shadow-sm transition-all hover:bg-stone-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-stone-300"
+          >
+            {loading ? (
+              <>
+                <Loader2 size={16} className="animate-spin" aria-hidden="true" /> Checking…
+              </>
+            ) : (
+              "Check link"
+            )}
+          </button>
+        </div>
 
-        {error && (
-          <div className="p-4 bg-red-50 text-red-700 rounded-lg border border-red-200 mb-8">
-            {error}
+        {/* Examples — doubles as test cases */}
+        <div className="mt-5 border-t border-stone-100 pt-5">
+          <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-stone-400">Try an example (great for testing)</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {EXAMPLES.map((ex) => (
+              <button
+                key={ex.label}
+                type="button"
+                onClick={() => setUrl(ex.url)}
+                className="cursor-pointer rounded-full border border-stone-200 bg-stone-50 px-3.5 py-2 text-xs font-semibold text-stone-600 transition-all hover:border-amber-400 hover:text-amber-700 active:scale-95"
+              >
+                {ex.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </form>
+
+      {error && (
+        <div role="alert" className="mt-6 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+          {error}
+        </div>
+      )}
+
+      <div ref={resultRef} className="scroll-mt-24">
+        {verdict && (
+          <div className="mt-8">
+            <VerdictCard verdict={verdict} onReset={() => { setVerdict(null); setError(""); }} />
           </div>
         )}
+      </div>
 
-        {result && <CheckResult result={result} />}
-      </main>
-    </div>
+      <p className="mt-10 text-center text-xs leading-relaxed text-stone-400">
+        No checker can promise a site is safe — FixMP gives you the strongest honest signal,
+        never false certainty.
+      </p>
+    </section>
+  );
+}
+
+export default function LinkCheckPage() {
+  return (
+    <Suspense fallback={null}>
+      <div className="flex min-h-screen flex-col">
+        <Header />
+        <main className="flex-1">
+          <LinkCheckInner />
+        </main>
+        <Footer />
+      </div>
+    </Suspense>
   );
 }

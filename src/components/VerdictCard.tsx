@@ -30,7 +30,13 @@ export default function VerdictCard({ verdict, onReset }: VerdictCardProps) {
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
   const [feedback, setFeedback] = useState<null | "up" | "down" | "wrong">(null);
-  const s = riskStyles[verdict.riskLevel];
+
+  // Honest labeling: a clear result from a PARTIAL check is shown amber, not green.
+  const partial = verdict.deepScanStatus === "busy" || verdict.deepScanStatus === "off";
+  const partialOnly = partial && verdict.riskLevel === "clear";
+  const bannerLevel = partialOnly ? "review" : verdict.riskLevel;
+  const statusText = partialOnly ? "PARTIAL CHECK — DEEP SCAN UNAVAILABLE" : verdict.statusText;
+  const s = riskStyles[bannerLevel];
 
   async function copySafer() {
     if (!verdict.saferVersion) return;
@@ -52,12 +58,17 @@ export default function VerdictCard({ verdict, onReset }: VerdictCardProps) {
           className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 font-mono text-[11px] font-bold uppercase tracking-[0.15em] ${s.chip}`}
         >
           <span aria-hidden="true" className={`h-2 w-2 rounded-full ${s.dot}`} />
-          {verdict.statusText}
+          {statusText}
         </span>
         <p className="mt-3 text-lg font-bold leading-snug text-stone-900 sm:text-xl">{verdict.summary}</p>
         <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.2em] text-stone-500">
           {verdict.tool} · confidence {Math.round(verdict.confidence * 100)}%
         </p>
+        {partial && !partialOnly && (
+          <p className="mt-3 rounded-lg border border-amber-300 bg-amber-100/60 px-3 py-2 text-xs font-medium text-amber-800">
+            Note: the deep scan couldn&apos;t run for this check — image-level risks may be missing. Try again shortly for the full scan.
+          </p>
+        )}
       </div>
 
       {/* Findings */}
@@ -145,12 +156,12 @@ export default function VerdictCard({ verdict, onReset }: VerdictCardProps) {
         </dl>
       </section>
 
-      {/* Processing disclosure — what actually happened to this content */}
+      {/* Processing disclosure */}
       <p className="flex items-start gap-2 px-1 text-xs leading-relaxed text-stone-500">
         <Server size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
         {verdict.aiUsed
           ? "For this check, your content was processed on FixMP's server and by our AI provider (Google Gemini). Nothing was stored."
-          : "For this check, your content was processed on FixMP's server using pattern checks. Nothing was stored."}
+          : "For this check, your content was processed on FixMP's server using local pattern checks. Nothing was stored."}
       </p>
 
       {/* Limitations */}

@@ -19,7 +19,7 @@ const PATTERNS: Pattern[] = [
     id: "password",
     category: "Password or passphrase",
     severity: "high",
-    regex: /\b(password|passwd|pwd|pass)\s*[:=]\s*\S+/gi,
+    regex: /\b(password|passwd|pwd|pass)\s*(?:is|:|=)\s*\S+/gi,
     description: "It looks like a password is written out in this text.",
     action: "Delete it. If it was ever shared anywhere, change that password.",
     label: "[password removed]",

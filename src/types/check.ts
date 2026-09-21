@@ -1,27 +1,28 @@
 // ═══════════════════════════════════════════════════════════════
 // FIXMP result model — V2 (canonical) + V1 (legacy) compatibility
-//
-// CANONICAL (used by all redesigned UI):
-//   Severity, VerdictLevel, VerdictFinding, Verdict
-//
-// LEGACY (still produced by V1 API routes + services; kept so
-// check-engine, deterministic-checks, CheckResult and the
-// not-yet-redesigned pages keep compiling):
-//   RiskLevel, Finding, CheckRequest, CheckResponse
 // ═══════════════════════════════════════════════════════════════
 
 // ── Canonical ──────────────────────────────────────────────────
 export type Severity = "high" | "medium" | "low";
 export type VerdictLevel = "stop" | "review" | "clear";
 
+/** Normalized region (0–1000 scale) — maps onto ANY resolution of the same image. */
+export interface RedactionRegion {
+  yMin: number;
+  xMin: number;
+  yMax: number;
+  xMax: number;
+}
+
 export interface VerdictFinding {
   id: string;
   category: string;
   severity: Severity;
   description: string;
-  evidence: string; // always masked — never the full value
+  evidence: string;
   action: string;
   count?: number;
+  region?: RedactionRegion; // present when the finding is tied to a visible area
 }
 
 export interface Verdict {
@@ -31,15 +32,16 @@ export interface Verdict {
   statusText: string;
   summary: string;
   findings: VerdictFinding[];
-  dont: string; // 🚫
-  check: string; // ⚠️
-  do: string; // ✅
-  why: string; // 🔍
-  next: string; // ➡️
+  dont: string;
+  check: string;
+  do: string;
+  why: string;
+  next: string;
   confidence: number;
   limitations: string;
   saferVersion?: string;
-  aiUsed?: boolean; // NEW
+  aiUsed?: boolean;
+  deepScanStatus?: "full" | "busy" | "off"; // honest labeling of how much actually ran
 }
 
 // ── Legacy (V1) ────────────────────────────────────────────────
@@ -51,6 +53,7 @@ export interface Finding {
   description: string;
   evidence?: string;
   recommendedAction: string;
+  region?: RedactionRegion;
 }
 
 export interface CheckRequest {
@@ -60,7 +63,7 @@ export interface CheckRequest {
 }
 
 export interface CheckResponse {
-  status: string; // "SUCCESS" | "ERROR"
+  status: string; // "SUCCESS" | "ERROR" | "AI_OFF"
   riskLevel: RiskLevel;
   summary: string;
   findings: Finding[];
@@ -72,5 +75,7 @@ export interface CheckResponse {
   confidence: number;
   limitations: string;
   saferVersion?: string;
-aiUsed?: boolean; // NEW — true only when Gemini actually processed this check
+  aiUsed?: boolean;
+  deepScanStatus?: "full" | "busy" | "off"; // honest labeling of how much actually ran
+statusText?: string; // optional tool-specific wording (Link Check uses spec §8 labels)
 }

@@ -18,7 +18,7 @@ export function toVerdict(res: CheckResponse, original: string, tool: string): V
     tool,
     original,
     riskLevel: LEVEL_MAP[res.riskLevel] ?? "review",
-    statusText: STATUS_MAP[res.riskLevel] ?? "A FEW THINGS TO REVIEW",
+        statusText: res.statusText ?? STATUS_MAP[res.riskLevel] ?? "A FEW THINGS TO REVIEW",
     summary: res.summary,
     findings: (res.findings ?? []).map((f, i) => ({
       id: `f-${i}-${f.category.toLowerCase().replace(/\W+/g, "-")}`,
@@ -27,6 +27,7 @@ export function toVerdict(res: CheckResponse, original: string, tool: string): V
       description: f.description,
       evidence: f.evidence ?? "",
       action: f.recommendedAction,
+      region: f.region,
     })),
     dont: res.dont,
     check: res.check,
@@ -36,6 +37,7 @@ export function toVerdict(res: CheckResponse, original: string, tool: string): V
     confidence: res.confidence,
     limitations: res.limitations,
     saferVersion: res.saferVersion,
-    aiUsed: res.aiUsed, // NEW
+    aiUsed: res.aiUsed,
+deepScanStatus: res.deepScanStatus, // NEW
   };
 }
