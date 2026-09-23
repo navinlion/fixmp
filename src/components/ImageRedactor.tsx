@@ -1,16 +1,21 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Check, Download, Loader2, ShieldCheck, Undo2 } from "lucide-react";
+import { Check, Download, Loader2, ShieldCheck, Sparkles, Undo2 } from "lucide-react";
 import type { Severity, VerdictFinding } from "@/types/check";
 
 const sevDot: Record<Severity, string> = { high: "bg-red-500", medium: "bg-amber-500", low: "bg-emerald-500" };
+const FREE_AI_RETOUCHES = 5;
+const USAGE_KEY = "fixmp_ai_retouch_used";
+
+type Mode = "standard" | "ai";
 
 interface RemovableFinding {
   id: string;
   category: string;
   description: string;
   severity: Severity;
+  region?: { yMin: number; xMin: number; yMax: number; xMax: number };
 }
 
 interface ImageRedactorProps {
@@ -19,12 +24,31 @@ interface ImageRedactorProps {
   notRemovable: VerdictFinding[];
 }
 
+function getUsedCount(): number {
+  try {
+    return Number(localStorage.getItem(USAGE_KEY) ?? "0") || 0;
+  } catch {
+    return 0;
+  }
+}
+function setUsedCount(n: number) {
+  try {
+    localStorage.setItem(USAGE_KEY, String(n));
+  } catch {
+    /* testing build — allow */
+  }
+}
+
 export default function ImageRedactor({ originalFile, removable, notRemovable }: ImageRedactorProps) {
   const [selected, setSelected] = useState<Set<string>>(new Set<string>());
+  const [mode, setMode] = useState<Mode>("standard");
   const [working, setWorking] = useState(false);
   const [resultUrl, setResultUrl] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const [used, setUsed] = useState(0);
   const urlRef = useRef<string | null>(null);
+
+  const remaining = Math.max(0, FREE_AI_RETOUCHES - used);
 
   const allSelected = useMemo(
     () => removable.length > 0 && removable.every((f) => selected.has(f.id)),
@@ -33,9 +57,9 @@ export default function ImageRedactor({ originalFile, removable, notRemovable }:
 
   useEffect(() => {
     setSelected(new Set(removable.map((f) => f.id)));
+    setUsed(getUsedCount());
   }, [removable]);
 
-  // Clean up the object URL when leaving
   useEffect(() => {
     return () => {
       if (urlRef.current) URL.revokeObjectURL(urlRef.current);
@@ -51,45 +75,180 @@ export default function ImageRedactor({ originalFile, removable, notRemovable }:
     });
   }
 
-  function pixelateRegion(
-    ctx: CanvasRenderingContext2D,
-    img: HTMLImageElement | HTMLCanvasElement,
+  function cropRect(
     region: { yMin: number; xMin: number; yMax: number; xMax: number },
     W: number,
     H: number
   ) {
-    const pad = Math.max(10, Math.round(Math.min(W, H) * 0.02)); // safety margin — AI boxes can be slightly off
-    const sx = Math.max(0, (region.xMin / 1000) * W - pad);
-    const sy = Math.max(0, (region.yMin / 1000) * H - pad);
-    const sw = Math.min(W - sx, ((region.xMax - region.xMin) / 1000) * W + pad * 2);
-    const sh = Math.min(H - sy, ((region.yMax - region.yMin) / 1000) * H + pad * 2);
-    if (sw <= 2 || sh <= 2) return;
+    const pad = Math.max(24, Math.round(Math.min(W, H) * 0.05));
+    const cx = Math.max(0, Math.round((region.xMin / 1000) * W - pad));
+    const cy = Math.max(0, Math.round((region.yMin / 1000) * H - pad));
+    const cw = Math.min(W - cx, Math.round(((region.xMax - region.xMin) / 1000) * W + pad * 2));
+    const ch = Math.min(H - cy, Math.round(((region.yMax - region.yMin) / 1000) * H + pad * 2));
+    return { cx, cy, cw, ch };
+  }
 
-    // Shrink to a tiny canvas, then blow back up with smoothing off → strong pixelation
-    const factor = 24;
-    const tw = Math.max(1, Math.round(sw / factor));
-    const th = Math.max(1, Math.round(sh / factor));
-    const tmp = document.createElement("canvas");
-    tmp.width = tw;
-    tmp.height = th;
-    const tctx = tmp.getContext("2d");
-    if (!tctx) return;
-    tctx.drawImage(img, sx, sy, sw, sh, 0, 0, tw, th);
+  async function buildPatchAndMask(
+    source: HTMLCanvasElement,
+    region: { yMin: number; xMin: number; yMax: number; xMax: number },
+    W: number,
+    H: number
+  ): Promise<{ patch: string; mask: string; cx: number; cy: number } | null> {
+    const { cx, cy, cw, ch } = cropRect(region, W, H);
+    if (cw < 16 || ch < 16) return null;
 
-    ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(tmp, 0, 0, tw, th, sx, sy, sw, sh);
-    ctx.imageSmoothingEnabled = true;
+    const patch = document.createElement("canvas");
+    patch.width = cw;
+    patch.height = ch;
+    const pctx = patch.getContext("2d");
+    if (!pctx) return null;
+    pctx.drawImage(source, cx, cy, cw, ch, 0, 0, cw, ch);
+
+    const mask = document.createElement("canvas");
+    mask.width = cw;
+    mask.height = ch;
+    const mctx = mask.getContext("2d");
+    if (!mctx) return null;
+    mctx.fillStyle = "#000";
+    mctx.fillRect(0, 0, cw, ch);
+
+    const mx = Math.max(0, Math.round((region.xMin / 1000) * W - cx));
+    const my = Math.max(0, Math.round((region.yMin / 1000) * H - cy));
+    const mw = Math.min(cw - mx, Math.round(((region.xMax - region.xMin) / 1000) * W));
+    const mh = Math.min(ch - my, Math.round(((region.yMax - region.yMin) / 1000) * H));
+    const r = Math.max(8, Math.round(Math.min(mw, mh) * 0.15));
+
+    mctx.fillStyle = "#fff";
+    mctx.fillRect(Math.max(0, mx - r / 2), Math.max(0, my - r / 2), Math.min(cw, mw + r), Math.min(ch, mh + r));
+    mctx.filter = `blur(${Math.round(r / 2)}px)`;
+    mctx.drawImage(mask, 0, 0);
+    mctx.filter = "none";
+    mctx.fillStyle = "#fff";
+    mctx.fillRect(mx, my, mw, mh);
+
+    return { patch: patch.toDataURL("image/png"), mask: mask.toDataURL("image/png"), cx, cy };
+  }
+
+  /** Standard retouch: deterministic edge-interpolation fill, 100% local. */
+  function retouchRegionLocal(
+    ctx: CanvasRenderingContext2D,
+    source: HTMLCanvasElement,
+    region: { yMin: number; xMin: number; yMax: number; xMax: number },
+    W: number,
+    H: number
+  ) {
+    const padIn = Math.max(10, Math.round(Math.min(W, H) * 0.02));
+    const padOut = padIn * 3;
+
+    const bx = Math.max(0, Math.round((region.xMin / 1000) * W - padOut));
+    const by = Math.max(0, Math.round((region.yMin / 1000) * H - padOut));
+    const bw = Math.min(W - bx, Math.round(((region.xMax - region.xMin) / 1000) * W + padOut * 2));
+    const bh = Math.min(H - by, Math.round(((region.yMax - region.yMin) / 1000) * H + padOut * 2));
+    if (bw < 6 || bh < 6) return;
+
+    const ix = Math.max(0, Math.round((region.xMin / 1000) * W - padIn)) - bx;
+    const iy = Math.max(0, Math.round((region.yMin / 1000) * H - padIn)) - by;
+    const iw = Math.min(bw - ix, Math.round(((region.xMax - region.xMin) / 1000) * W + padIn * 2));
+    const ih = Math.min(bh - iy, Math.round(((region.yMax - region.yMin) / 1000) * H + padIn * 2));
+    if (iw < 4 || ih < 4) return;
+
+    const work = document.createElement("canvas");
+    work.width = bw;
+    work.height = bh;
+    const wctx = work.getContext("2d");
+    if (!wctx) return;
+    wctx.drawImage(source, bx, by, bw, bh, 0, 0, bw, bh);
+
+    const idata = wctx.getImageData(0, 0, bw, bh);
+    const d = idata.data;
+    const idx = (x: number, y: number) => (y * bw + x) * 4;
+    const sample = Math.max(4, Math.round(Math.min(W, H) * 0.012));
+
+    const bandAvgX = (y: number, x0: number, x1: number): [number, number, number] | null => {
+      const xa = Math.max(0, x0), xb = Math.min(bw, x1);
+      let r = 0, g = 0, b = 0, n = 0;
+      for (let x = xa; x < xb; x++) { const i = idx(x, y); r += d[i]; g += d[i + 1]; b += d[i + 2]; n++; }
+      return n ? [r / n, g / n, b / n] : null;
+    };
+    const bandAvgY = (x: number, y0: number, y1: number): [number, number, number] | null => {
+      const ya = Math.max(0, y0), yb = Math.min(bh, y1);
+      let r = 0, g = 0, b = 0, n = 0;
+      for (let y = ya; y < yb; y++) { const i = idx(x, y); r += d[i]; g += d[i + 1]; b += d[i + 2]; n++; }
+      return n ? [r / n, g / n, b / n] : null;
+    };
+
+    for (let y = iy; y < iy + ih; y++) {
+      const left = ix > 0 ? bandAvgX(y, ix - sample, ix) : null;
+      const right = ix + iw < bw ? bandAvgX(y, ix + iw, ix + iw + sample) : null;
+      const L = left ?? right, R = right ?? left;
+      if (!L || !R) continue;
+      for (let x = ix; x < ix + iw; x++) {
+        const t = (x - ix + 0.5) / iw;
+        const i = idx(x, y);
+        d[i] = L[0] + (R[0] - L[0]) * t;
+        d[i + 1] = L[1] + (R[1] - L[1]) * t;
+        d[i + 2] = L[2] + (R[2] - L[2]) * t;
+        d[i + 3] = 255;
+      }
+    }
+    for (let x = ix; x < ix + iw; x++) {
+      const top = iy > 0 ? bandAvgY(x, iy - sample, iy) : null;
+      const bottom = iy + ih < bh ? bandAvgY(x, iy + ih, iy + ih + sample) : null;
+      const T = top ?? bottom, B = bottom ?? top;
+      if (!T || !B) continue;
+      for (let y = iy; y < iy + ih; y++) {
+        const t = (y - iy + 0.5) / ih;
+        const i = idx(x, y);
+        d[i] = (d[i] + T[0] + (B[0] - T[0]) * t) / 2;
+        d[i + 1] = (d[i + 1] + T[1] + (B[1] - T[1]) * t) / 2;
+        d[i + 2] = (d[i + 2] + T[2] + (B[2] - T[2]) * t) / 2;
+      }
+    }
+    wctx.putImageData(idata, 0, 0);
+
+    const feather = Math.max(6, Math.round(padOut * 0.6));
+    const mask = document.createElement("canvas");
+    mask.width = bw;
+    mask.height = bh;
+    const mk = mask.getContext("2d");
+    if (!mk) return;
+    mk.fillStyle = "#000";
+    mk.fillRect(ix, iy, iw, ih);
+    const edge = (fx0: number, fy0: number, fx1: number, fy1: number, rx: number, ry: number, rw: number, rh: number) => {
+      const g = mk.createLinearGradient(fx0, fy0, fx1, fy1);
+      g.addColorStop(0, "rgba(0,0,0,0)");
+      g.addColorStop(1, "rgba(0,0,0,1)");
+      mk.fillStyle = g;
+      mk.fillRect(rx, ry, rw, rh);
+    };
+    const fadeL = Math.min(feather, ix);
+    if (fadeL > 0) edge(ix - fadeL, 0, ix, 0, ix - fadeL, iy, fadeL, ih);
+    const fadeR = Math.min(feather, bw - (ix + iw));
+    if (fadeR > 0) edge(ix + iw, 0, ix + iw + fadeR, 0, ix + iw, iy, fadeR, ih);
+    const fadeT = Math.min(feather, iy);
+    if (fadeT > 0) edge(0, iy - fadeT, 0, iy, ix, iy - fadeT, iw, fadeT);
+    const fadeB = Math.min(feather, bh - (iy + ih));
+    if (fadeB > 0) edge(0, iy + ih, 0, iy + ih + fadeB, ix, iy + ih, iw, fadeB);
+
+    wctx.globalCompositeOperation = "destination-in";
+    wctx.drawImage(mask, 0, 0);
+    wctx.globalCompositeOperation = "source-over";
+    ctx.drawImage(work, bx, by);
   }
 
   async function generateSafeCopy() {
-    if (!originalFile || selected.size === 0) return;
+    if (!originalFile || selected.size === 0 || working) return;
+    if (mode === "ai" && remaining === 0) {
+      setError("You've used all free AI retouches. Standard retouch is still free and private.");
+      return;
+    }
+
     setWorking(true);
     setError("");
 
     try {
       const chosen = removable.filter((f) => selected.has(f.id));
 
-      // Decode the ORIGINAL file at full resolution (never uploaded anywhere)
       const url = URL.createObjectURL(originalFile);
       const img = new Image();
       img.src = url;
@@ -101,12 +260,39 @@ export default function ImageRedactor({ originalFile, removable, notRemovable }:
       canvas.height = img.naturalHeight;
       const ctx = canvas.getContext("2d");
       if (!ctx) throw new Error("canvas");
-
       ctx.drawImage(img, 0, 0);
 
-         for (const f of chosen) {
-        const region = (f as RemovableFinding & { region?: { yMin: number; xMin: number; yMax: number; xMax: number } }).region;
-        if (region) pixelateRegion(ctx, canvas, region, canvas.width, canvas.height);
+      let aiSucceeded = false;
+
+      for (const f of chosen) {
+        if (!f.region) continue;
+
+        if (mode === "ai") {
+          const pm = await buildPatchAndMask(canvas, f.region, canvas.width, canvas.height);
+          if (!pm) continue;
+
+          const res = await fetch("/api/redact", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ image: pm.patch, mask: pm.mask }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || "AI retouch failed. Try Standard retouch.");
+
+          const filled = new Image();
+          filled.src = data.image;
+          await filled.decode();
+          ctx.drawImage(filled, pm.cx, pm.cy);
+          aiSucceeded = true;
+        } else {
+          retouchRegionLocal(ctx, canvas, f.region, canvas.width, canvas.height);
+        }
+      }
+
+      if (mode === "ai" && aiSucceeded) {
+        const n = getUsedCount() + 1;
+        setUsedCount(n);
+        setUsed(n);
       }
 
       const blob = await new Promise<Blob | null>((resolve) =>
@@ -118,8 +304,8 @@ export default function ImageRedactor({ originalFile, removable, notRemovable }:
       const newUrl = URL.createObjectURL(blob);
       urlRef.current = newUrl;
       setResultUrl(newUrl);
-    } catch {
-      setError("Couldn't create the safe copy in your browser. Please try again.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Couldn't create the safe copy. Please try again.");
     } finally {
       setWorking(false);
     }
@@ -159,11 +345,41 @@ export default function ImageRedactor({ originalFile, removable, notRemovable }:
             Generate a safe-to-share version?
           </h3>
           <p className="mt-1 text-sm leading-relaxed text-stone-600">
-            FixMP can create a copy with the findings below strongly pixelated — every other
-            pixel stays exactly as you took it. The copy is made <strong>in your browser</strong>;
-            your original file is never modified and never uploaded.
+            The findings below are removed and the area is rebuilt naturally. Every other pixel
+            stays exactly as you took it; your original file is never modified.
           </p>
         </div>
+      </div>
+
+      {/* Mode picker */}
+      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+        <label className={`cursor-pointer rounded-xl border p-4 transition-all ${
+          mode === "standard" ? "border-amber-500 bg-white shadow-sm" : "border-stone-200 bg-white hover:border-stone-300"
+        }`}>
+          <input type="radio" name="redact-mode" className="sr-only" checked={mode === "standard"} onChange={() => setMode("standard")} />
+          <p className="flex items-center gap-2 text-sm font-bold text-stone-900">
+            <ShieldCheck size={15} className="text-emerald-600" aria-hidden="true" /> Standard retouch
+          </p>
+          <p className="mt-1 text-xs leading-relaxed text-stone-500">
+            Free & unlimited · 100% in your browser · nothing uploaded anywhere · clean fill
+          </p>
+        </label>
+
+        <label className={`cursor-pointer rounded-xl border p-4 transition-all ${
+          mode === "ai" ? "border-amber-500 bg-white shadow-sm" : "border-stone-200 bg-white hover:border-stone-300"
+        } ${remaining === 0 ? "opacity-60" : ""}`}>
+          <input type="radio" name="redact-mode" className="sr-only" checked={mode === "ai"} onChange={() => setMode("ai")} disabled={remaining === 0} />
+          <p className="flex items-center gap-2 text-sm font-bold text-stone-900">
+            <Sparkles size={15} className="text-amber-600" aria-hidden="true" /> AI natural retouch
+            <span className="rounded-full bg-amber-100 px-2 py-0.5 font-mono text-[9px] font-bold uppercase tracking-widest text-amber-700">
+              {remaining} of {FREE_AI_RETOUCHES} free
+            </span>
+          </p>
+          <p className="mt-1 text-xs leading-relaxed text-stone-500">
+            Professional inpainting — texture is realistically rebuilt. Only the cropped patch
+            around each finding is processed; the rest of your photo is untouched.
+          </p>
+        </label>
       </div>
 
       {/* Region picker */}
@@ -173,9 +389,7 @@ export default function ImageRedactor({ originalFile, removable, notRemovable }:
             Remove from the copy
           </p>
           <button
-            onClick={() =>
-              setSelected(allSelected ? new Set() : new Set(removable.map((f) => f.id)))
-            }
+            onClick={() => setSelected(allSelected ? new Set() : new Set(removable.map((f) => f.id)))}
             className="cursor-pointer text-xs font-bold text-amber-700 hover:text-amber-800"
           >
             {allSelected ? "Clear all" : "Select all"}
@@ -185,12 +399,7 @@ export default function ImageRedactor({ originalFile, removable, notRemovable }:
           {removable.map((f) => (
             <li key={f.id}>
               <label className="flex cursor-pointer items-start gap-3 rounded-lg p-2 transition-colors hover:bg-stone-50">
-                <input
-                  type="checkbox"
-                  checked={selected.has(f.id)}
-                  onChange={() => toggle(f.id)}
-                  className="mt-0.5 h-4 w-4 accent-amber-600"
-                />
+                <input type="checkbox" checked={selected.has(f.id)} onChange={() => toggle(f.id)} className="mt-0.5 h-4 w-4 accent-amber-600" />
                 <span aria-hidden="true" className={`mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full ${sevDot[f.severity]}`} />
                 <span className="text-sm">
                   <strong className="text-stone-900">{f.category}</strong>
@@ -204,8 +413,7 @@ export default function ImageRedactor({ originalFile, removable, notRemovable }:
         {notRemovable.length > 0 && (
           <div className="mt-4 border-t border-stone-100 pt-3">
             <p className="text-xs leading-relaxed text-stone-500">
-              <strong className="text-stone-700">Can&apos;t be auto-removed</strong> (no fixed
-              location — handle manually):{" "}
+              <strong className="text-stone-700">Can&apos;t be auto-removed</strong> (no fixed location — handle manually):{" "}
               {notRemovable.map((f) => f.category).join(", ")}.
             </p>
           </div>
@@ -215,11 +423,12 @@ export default function ImageRedactor({ originalFile, removable, notRemovable }:
       <button
         onClick={generateSafeCopy}
         disabled={working || selected.size === 0}
-        className="mt-4 flex h-13 w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-stone-900 px-6 py-3.5 text-sm font-bold uppercase tracking-wider text-white transition-all hover:bg-stone-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-stone-300"
+        className="mt-4 flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-stone-900 px-6 py-3.5 text-sm font-bold uppercase tracking-wider text-white transition-all hover:bg-stone-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-stone-300"
       >
         {working ? (
           <>
-            <Loader2 size={16} className="animate-spin" aria-hidden="true" /> Creating safe copy…
+            <Loader2 size={16} className="animate-spin" aria-hidden="true" />
+            {mode === "ai" ? "AI retouching — a few seconds per area…" : "Creating safe copy…"}
           </>
         ) : (
           <>
@@ -247,13 +456,12 @@ export default function ImageRedactor({ originalFile, removable, notRemovable }:
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src={resultUrl}
-            alt="Safe-to-share preview with selected findings pixelated"
+            alt="Safe-to-share preview with selected findings retouched out"
             className="mt-3 max-h-[420px] w-full rounded-lg border border-stone-200 object-contain"
           />
           <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-stone-100 pt-3">
             <p className="text-xs leading-relaxed text-stone-500">
-              Re-encoding also strips hidden metadata (like GPS) from the copy. Pixelation is
-              strong, but AI boxes can be slightly off — always eyeball the result before sharing.
+              Re-encoding also strips hidden metadata (like GPS). Always eyeball the result before sharing.
             </p>
             <button
               onClick={generateSafeCopy}
