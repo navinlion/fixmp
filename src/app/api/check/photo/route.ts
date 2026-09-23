@@ -3,6 +3,8 @@ import { analyzeImage } from "@/services/photo-check-service";
 import { LIMITS } from "@/config/flags";
 
 // LOGGING RULE: never log user content (image data, findings evidence).
+// The failure cause is ALWAYS logged (message only) — a swallowed error here
+// once cost days of diagnosis.
 
 export async function POST(req: NextRequest) {
   try {
@@ -48,16 +50,35 @@ export async function POST(req: NextRequest) {
     });
   } catch (error: any) {
     const msg = String(error?.message ?? "");
+    console.error("Photo check failed:", msg); // ALWAYS — this names the real cause
 
-    // Google overload / network — friendly, retry-friendly (spec §28)
-    if (/overload|high demand|503|rate|timeout|fetch failed|network/i.test(msg)) {
+    // Quota vs overload vs network — distinct, honest messages (spec §28)
+    if (/quota|RESOURCE_EXHAUSTED/i.test(msg)) {
+      return NextResponse.json(
+        { error: "The deep scan's daily free-tier limit is reached. It resets tonight — or check again tomorrow." },
+        { status: 503 }
+      );
+    }
+    if (/overload|high demand|503|rate/i.test(msg)) {
       return NextResponse.json(
         { error: "FixMP's deep scan is busy right now. Please try again in a minute." },
         { status: 503 }
       );
     }
+    if (/timeout|abort/i.test(msg)) {
+      return NextResponse.json(
+        { error: "The deep scan took too long and was stopped. Please try again." },
+        { status: 503 }
+      );
+    }
+    if (/fetch failed|network/i.test(msg)) {
+      return NextResponse.json(
+        { error: "Couldn't reach the deep scan service. Please try again." },
+        { status: 503 }
+      );
+    }
 
-    console.error("Photo check failed:", msg); // message only — never content
+    console.error("Photo check failed (unclassified):", msg);
     return NextResponse.json(
       { error: "Something went wrong while checking this photo. Please try again." },
       { status: 500 }

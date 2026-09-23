@@ -1,10 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 
 // LOGGING RULE: never log image content. Status/message only.
-// Forwards a CROPPED PATCH + mask to the LaMa endpoint (IOPaint locally).
+//
+// IOPaint 1.6 contract (verified via /openapi.json):
+//   POST /api/v1/inpaint  — application/json body { image, mask, ... }
+//   where image/mask are base64 strings (Pydantic v2 bytes fields)
+//   200 response — JSON, containing the result image as base64.
 
 const MAX_PATCH_CHARS = 8 * 1024 * 1024;
-const TIMEOUT_MS = 120_000;
+const TIMEOUT_MS = 240_000;
 
 function looksLikeImage(buf: Buffer): boolean {
   return (buf[0] === 0x89 && buf[1] === 0x50) || (buf[0] === 0xff && buf[1] === 0xd8);
@@ -34,38 +38,54 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Retouch region too large." }, { status: 400 });
     }
 
-    const imgBytes = Buffer.from(image.split(",")[1], "base64");
-    const maskBytes = Buffer.from(mask.split(",")[1], "base64");
-
-    const attempt = (imageField: string) => {
-      const form = new FormData();
-      form.append(imageField, new Blob([new Uint8Array(imgBytes)], { type: "image/png" }), "image.png");
-      form.append("mask", new Blob([new Uint8Array(maskBytes)], { type: "image/png" }), "mask.png");
-      form.append("model", "lama");
-      form.append("model_name", "lama");
-      return fetch(endpoint, {
-        method: "POST",
-        body: form,
-        signal: AbortSignal.timeout(TIMEOUT_MS),
-      });
+    // JSON contract: raw base64 (no data: prefix) for the bytes fields.
+    const payload = {
+      image: image.split(",")[1],
+      mask: mask.split(",")[1],
+      model: "lama",
     };
 
-    let res = await attempt("image");
-    if (res.status === 422) {
-      res = await attempt("file"); // legacy IOPaint field-name alias
-    }
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
 
     if (!res.ok) {
-      console.error("Retouch service error:", res.status); // status only
+      const errBody = await res.text().catch(() => "");
+      console.error(`Retouch service error ${res.status}:`, errBody.slice(0, 500));
       return NextResponse.json(
         { error: "The AI retouch service returned an error. Standard retouch still works." },
         { status: 502 }
       );
     }
 
-    const buf = Buffer.from(await res.arrayBuffer());
+    // Response is JSON: { image: "<base64 png>" } (schema undocumented — handle
+    // defensively; fall back to treating the body as raw image bytes).
+    const text = await res.text();
+    let resultB64: string | null = null;
+    try {
+      const j = JSON.parse(text);
+      if (typeof j?.image === "string") {
+        resultB64 = j.image.startsWith("data:") ? j.image.split(",")[1] : j.image;
+      }
+    } catch {
+      /* not JSON — fall through to raw-bytes handling */
+    }
+
+    let buf: Buffer;
+    if (resultB64) {
+      buf = Buffer.from(resultB64, "base64");
+    } else {
+      buf = Buffer.from(text, "base64");
+    }
+
     if (!looksLikeImage(buf)) {
-      console.error("Retouch service returned non-image:", buf.toString("utf8").slice(0, 200));
+      console.error(
+        "Retouch service returned non-image:",
+        text.slice(0, 300) // diagnostics only
+      );
       return NextResponse.json(
         { error: "AI retouch service responded unexpectedly. Standard retouch still works." },
         { status: 502 }
@@ -76,7 +96,13 @@ export async function POST(req: NextRequest) {
   } catch (error: any) {
     const msg = String(error?.message ?? "");
     console.error("Retouch failed:", msg); // message only
-    if (/ECONNREFUSED|fetch failed|network|abort|timeout/i.test(msg)) {
+    if (/abort|timeout/i.test(msg)) {
+      return NextResponse.json(
+        { error: "AI retouch took too long and was stopped. Please retry — if it keeps happening, use Standard retouch." },
+        { status: 503 }
+      );
+    }
+    if (/ECONNREFUSED|fetch failed|network/i.test(msg)) {
       return NextResponse.json(
         { error: "AI retouch service isn't reachable. Make sure IOPaint is running, or use Standard retouch." },
         { status: 503 }

@@ -4,9 +4,12 @@ import { analyzeContent } from "@/services/ai-check-service";
 import { LIMITS } from "@/config/flags";
 import type { CheckResponse, Finding, RiskLevel } from "@/types/check";
 
-// LOGGING RULE: never log user content (textContent, image data, findings evidence).
+// LOGGING RULE: never log user content. Message strings only.
+// Quota vs overload is now distinguishable in the logs — copy reflects both.
 
 const MAX_TEXT_LENGTH = 5000; // matches AI Check — shared analyzeContent budget
+
+type DeepScanStatus = "full" | "busy" | "off" | "skipped";
 
 function maxSeverity(findings: Finding[]): RiskLevel {
   if (findings.some((f) => f.severity === "HIGH")) return "HIGH";
@@ -14,26 +17,30 @@ function maxSeverity(findings: Finding[]): RiskLevel {
   return "LOW";
 }
 
-/** The honesty rule: if an image was submitted but couldn't be analyzed,
- *  that GAP is a finding — never a quiet "no red flags". */
-function imageGapFinding(reason: "off" | "busy"): Finding {
-  return reason === "off"
-    ? {
-        category: "Image not analyzed",
-        severity: "MEDIUM",
-        description:
-          "Deep image analysis is switched off in this test build — backgrounds, screens and documents in your image were NOT checked.",
-        recommendedAction:
-          "Review the image manually (backgrounds, screens, documents, other people), or re-enable deep analysis.",
-      }
-    : {
-        category: "Image not analyzed",
-        severity: "MEDIUM",
-        description:
-          "The deep scan couldn't analyze your image just now — backgrounds, screens and documents were NOT checked.",
-        recommendedAction:
-          "Try the check again in a minute, or review the background manually before posting.",
-      };
+/** The honesty rule: if an image was submitted but NOT analyzed — whether the
+ *  user skipped deep scan, AI is off, or AI failed — that GAP is a finding,
+ *  never a quiet "no red flags". Wording adapts to the reason. */
+function imageGapFinding(status: DeepScanStatus): Finding {
+  const description =
+    status === "skipped"
+      ? "Deep image analysis wasn't requested (it's optional) — backgrounds, screens and documents in your image were NOT checked."
+      : status === "off"
+        ? "Deep image analysis is switched off in this test build — backgrounds, screens and documents in your image were NOT checked."
+        : "The deep scan couldn't analyze your image just now — backgrounds, screens and documents were NOT checked.";
+
+  const recommendedAction =
+    status === "skipped"
+      ? "Either review the background manually before posting, or turn on Deep AI analysis and run the check again."
+      : status === "off"
+        ? "Review the image manually (backgrounds, screens, documents, other people), or re-enable deep analysis."
+        : "Try the check again in a minute, or review the background manually before posting.";
+
+  return {
+    category: "Image not analyzed",
+    severity: "MEDIUM",
+    description,
+    recommendedAction,
+  };
 }
 
 export async function POST(req: NextRequest) {
@@ -41,6 +48,7 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const textContent: unknown = body?.textContent;
     const imageBase64: unknown = body?.imageBase64;
+    const deepScanRequested: boolean = body?.deepScan === true;
 
     const text = typeof textContent === "string" ? textContent : "";
     const image = typeof imageBase64 === "string" ? imageBase64 : "";
@@ -89,92 +97,100 @@ export async function POST(req: NextRequest) {
             limitations: "",
           } as CheckResponse);
 
-    const aiRequested = text.trim().length > 0 || !!image;
     const isAiEnabled = process.env.AI_ENABLED === "true"; // SAFE default: OFF (spec §13/§20)
     const hasApiKey = !!process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.length > 10;
 
-    // 3. Tier 2 — deep analysis (text + vision), guarded by the kill switch
-    if (aiRequested && isAiEnabled && hasApiKey) {
-      try {
-        const aiResult = await analyzeContent(text || "", image || undefined);
+    // 3. Tier 2 — deep analysis. Runs ONLY when the user explicitly opted in
+    //    (deepScan) AND the kill switch allows it. Never automatic. (spec §20)
+    let deepScanStatus: DeepScanStatus = "skipped";
 
-        if (aiResult.additionalFindings?.length > 0) {
-          response.findings.push(...aiResult.additionalFindings);
+    if (deepScanRequested) {
+      if (!isAiEnabled) {
+        deepScanStatus = "off";
+        response.limitations =
+          "Deep AI analysis was requested but is switched off by the administrator in this test build. Pattern checks ran.";
+      } else if (!hasApiKey) {
+        deepScanStatus = "off";
+        response.limitations =
+          "Deep AI analysis was requested but no AI provider is configured. Pattern checks ran.";
+      } else {
+        try {
+          const aiResult = await analyzeContent(text || "", image || undefined);
+
+          if (aiResult.additionalFindings?.length > 0) {
+            response.findings.push(...aiResult.additionalFindings);
+          }
+          if (aiResult.saferVersion) {
+            response.saferVersion = aiResult.saferVersion;
+          }
+
+          response.riskLevel = maxSeverity(response.findings);
+          response.summary = `We found ${response.findings.length} thing${response.findings.length === 1 ? "" : "s"} to check in your post.`;
+
+          if (response.riskLevel === "HIGH") {
+            response.dont = "DO NOT publish this post in its current form.";
+            response.check = "The specific high-risk items flagged in the findings.";
+            response.do = "Crop, blur, or remove the flagged items before posting — or use the safer caption.";
+            response.why = "Background details or hidden text can identify you, your location, or your accounts.";
+            response.next = "Edit the post, then run the check again.";
+          }
+
+          return NextResponse.json({ ...response, aiUsed: true, deepScanStatus: "full" });
+        } catch (aiError: any) {
+          const msg = String(aiError?.message ?? "");
+          const quota = /quota|RESOURCE_EXHAUSTED/i.test(msg);
+          const busy = /overload|high demand|503|rate|timeout|fetch failed|network/i.test(msg);
+
+          console.error("AI Post analysis failed:", msg); // message only, never content
+
+          if (!image) {
+            // Text-only: deterministic results stand, honestly labeled.
+            response.limitations = quota
+              ? "Deep AI daily limit reached (free tier). It resets tonight — pattern checks ran and are unaffected."
+              : "Deep AI analysis was requested but is temporarily unavailable (provider busy). Pattern checks ran — try again shortly.";
+            return NextResponse.json({
+              ...response,
+              aiUsed: false,
+              deepScanStatus: "busy",
+            });
+          }
+
+          // Image present + AI failed → the gap itself becomes a finding.
+          response.findings.push(imageGapFinding("busy"));
+          response.riskLevel = maxSeverity(response.findings);
+          response.summary = `We found ${response.findings.length} thing${response.findings.length === 1 ? "" : "s"} to check — but your image could not be analyzed.`;
+          response.dont = "Don't publish the image until it has actually been analyzed.";
+          response.check = "Backgrounds, screens, documents and other people in the image — manually for now.";
+          response.do = quota
+            ? "The deep scan's daily limit is reached — it resets tonight. Meanwhile, review the background manually before posting."
+            : "Retry the check in a minute for the full image analysis.";
+          response.why = "An unchecked image can contain location clues, documents or screens you didn't notice.";
+          response.next = "Retry after the reset, or use Photo Check's self-check list meanwhile.";
+
+          return NextResponse.json({ ...response, aiUsed: false, deepScanStatus: "busy" });
         }
-        if (aiResult.saferVersion) {
-          response.saferVersion = aiResult.saferVersion;
-        }
-
-        response.riskLevel = maxSeverity(response.findings);
-        response.summary = `We found ${response.findings.length} thing${response.findings.length === 1 ? "" : "s"} to check in your post.`;
-
-        if (response.riskLevel === "HIGH") {
-          response.dont = "DO NOT publish this post in its current form.";
-          response.check = "The specific high-risk items flagged in the findings.";
-          response.do = "Crop, blur, or remove the flagged items before posting — or use the safer caption.";
-          response.why = "Background details or hidden text can identify you, your location, or your accounts.";
-          response.next = "Edit the post, then run the check again.";
-        }
-
-        return NextResponse.json({
-          ...response,
-          aiUsed: true,
-          deepScanStatus: "full",
-        });
-      } catch (aiError: any) {
-        const msg = String(aiError?.message ?? "");
-        const busy = /overload|high demand|503|rate|timeout|fetch failed|network/i.test(msg);
-
-        console.error("AI Post analysis failed:", msg); // message only, never content
-
-        // Text-only + AI down → deterministic results stand, labeled partial.
-        if (!image) {
-          response.limitations = busy
-            ? "Deep analysis is temporarily unavailable (provider busy). Pattern checks ran; tone/context review may be missing. Try again shortly."
-            : "Deep analysis is switched off in this test build. Only pattern checks ran.";
-          return NextResponse.json({
-            ...response,
-            aiUsed: false,
-            deepScanStatus: busy ? "busy" : "off",
-          });
-        }
-
-        // Image present + AI down → the gap itself becomes a finding.
-        response.findings.push(imageGapFinding(busy ? "busy" : "off"));
-        response.riskLevel = maxSeverity(response.findings);
-        response.summary = `We found ${response.findings.length} thing${response.findings.length === 1 ? "" : "s"} to check — but your image could not be analyzed.`;
-        response.dont = "Don't publish the image until it has actually been analyzed.";
-        response.check = "Backgrounds, screens, documents and other people in the image — manually for now.";
-        response.do = busy
-          ? "Retry the check in a minute for the full image analysis."
-          : "Review the image manually, or re-enable deep analysis in this test build.";
-        response.why = "An unchecked image can contain location clues, documents or screens you didn't notice.";
-        response.next = "Retry the check, or use Photo Check once the deep scan is available.";
-
-        return NextResponse.json({
-          ...response,
-          aiUsed: false,
-          deepScanStatus: busy ? "busy" : "off",
-        });
       }
     }
 
-    // 4. Kill switch / no key — honest partial state, gap finding if image present
+    // 4. Skipped / disabled — deterministic results stand, gap finding if image present
     if (image) {
-      response.findings.push(imageGapFinding("off"));
+      response.findings.push(imageGapFinding(deepScanStatus));
       response.riskLevel = maxSeverity(response.findings);
-      response.summary = `We found ${response.findings.length} thing${response.findings.length === 1 ? "" : "s"} to check — but your image could not be analyzed.`;
+      response.summary = `We found ${response.findings.length} thing${response.findings.length === 1 ? "" : "s"} to check — but your image was not analyzed.`;
       response.dont = "Don't publish the image until it has actually been analyzed.";
       response.check = "Backgrounds, screens, documents and other people in the image — manually for now.";
-      response.do = "Review the image manually, or re-enable deep analysis in this test build.";
+      response.do =
+        deepScanStatus === "skipped"
+          ? "Turn on Deep AI analysis and run the check again for the full image review."
+          : "Review the image manually, or re-enable deep analysis in this test build.";
       response.why = "An unchecked image can contain location clues, documents or screens you didn't notice.";
-      response.next = "Retry with deep analysis enabled, or use the Photo Check checklist.";
-    } else {
+      response.next = "Run the check with Deep AI analysis on, or use the Photo Check checklist.";
+    } else if (deepScanStatus === "skipped") {
       response.limitations =
-        "Deep analysis is switched off in this test build. Only pattern checks ran.";
+        "Deep AI analysis was not requested (it's optional). Local pattern checks ran on our server.";
     }
 
-    return NextResponse.json({ ...response, aiUsed: false, deepScanStatus: "off" });
+    return NextResponse.json({ ...response, aiUsed: false, deepScanStatus });
   } catch (error: any) {
     console.error("Post check failed:", String(error?.message ?? "")); // message only
     return NextResponse.json(

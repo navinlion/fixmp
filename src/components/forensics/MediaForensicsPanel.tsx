@@ -160,7 +160,7 @@ export default function MediaForensicsPanel() {
             fileName: file.name,
             fileType: file.type,
             fileBuffer: fileBuffer.slice(0),
-            rgbaBuffer: decoded.rgba.buffer.slice(0),
+             rgbaBuffer: new Uint8ClampedArray(decoded.rgba).buffer as ArrayBuffer,
             width: decoded.width,
             height: decoded.height,
             scanLevel,
@@ -229,8 +229,15 @@ export default function MediaForensicsPanel() {
             </button>
           </div>
           {previewUrl && (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={previewUrl} alt="Image to be forensically analyzed" className="mt-3 max-h-[360px] w-full rounded-xl border border-stone-200 object-contain" />
+            <div className="relative mt-3">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={previewUrl} alt="Image to be forensically analyzed" className="max-h-[360px] w-full rounded-xl border border-stone-200 object-contain" />
+              {progress && (
+                <div aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden rounded-xl">
+                  <div className="scanline" />
+                </div>
+              )}
+            </div>
           )}
 
           {!progress && !result && (

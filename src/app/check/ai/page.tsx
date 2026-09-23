@@ -9,6 +9,7 @@ import VerdictCard from "@/components/VerdictCard";
 import { SectionLabel } from "@/components/brand";
 import { toVerdict } from "@/lib/adapter";
 import type { CheckResponse, Verdict } from "@/types/check";
+import { AI_ENABLED } from "@/config/flags";
 import { ArrowLeft, ArrowRight, Bot, EyeOff, Loader2, ScanSearch, ShieldCheck, Zap } from "lucide-react";
 
 const MAX = 5000;
@@ -34,6 +35,7 @@ function AICheckInner() {
   const [verdict, setVerdict] = useState<Verdict | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [deepScan, setDeepScan] = useState(false);
   const resultRef = useRef<HTMLDivElement>(null);
 
   // Prefill from the homepage console (?q=...)
@@ -55,7 +57,7 @@ function AICheckInner() {
       const res = await fetch("/api/check/ai", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ textContent: value }),
+        body: JSON.stringify({ textContent: value, deepScan }),
       });
       const data = await res.json();
 
@@ -176,6 +178,25 @@ function AICheckInner() {
             ))}
           </div>
         </div>
+        {/* Optional deep scan — user opt-in, default OFF */}
+        {AI_ENABLED && (
+          <label className="mt-5 flex cursor-pointer items-start gap-3 rounded-xl border border-stone-200 bg-stone-50 p-4 transition-colors hover:border-amber-300">
+            <input
+              type="checkbox"
+              checked={deepScan}
+              onChange={(e) => setDeepScan(e.target.checked)}
+              className="mt-0.5 h-4 w-4 accent-amber-600"
+            />
+            <span className="text-sm">
+  <span className="font-bold text-stone-900">Advanced AI analysis</span>
+  <span className="block text-stone-500">
+    Optional. Off (default): everything is checked using local analysis rules
+    on our server — no AI analysis is used. On: your text is analyzed more
+    deeply to better understand context, nuance, and meaning.
+  </span>
+</span>
+          </label>
+        )}
 
         <button
           type="submit"
@@ -185,7 +206,7 @@ function AICheckInner() {
           {loading ? (
             <>
               <Loader2 size={17} className="animate-spin" aria-hidden="true" />
-              Checking your prompt…
+                            {deepScan ? "Checking + deep analysis…" : "Checking your prompt…"}
             </>
           ) : (
             <>

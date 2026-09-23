@@ -9,6 +9,35 @@ html {
   scroll-behavior: smooth;
 }
 
+@keyframes scan-sweep {
+  0% { top: -12%; }
+  100% { top: 104%; }
+}
+
+.scanline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 15%;
+  background: linear-gradient(to bottom, transparent, rgba(37, 99, 235, 0.35), transparent);
+  box-shadow: 0 0 28px rgba(37, 99, 235, 0.4);
+  animation: scan-sweep 1.6s ease-in-out infinite alternate;
+}
+
+@keyframes scan-x {
+  0% { left: -10%; }
+  100% { left: 102%; }
+}
+
+.scanline-x {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 18%;
+  background: linear-gradient(to right, transparent, rgba(37, 99, 235, 0.22), transparent);
+  animation: scan-x 1.4s ease-in-out infinite alternate;
+}
+
 @keyframes marquee {
   from { transform: translateX(0); }
   to { transform: translateX(-50%); }

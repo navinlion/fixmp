@@ -41,7 +41,7 @@ export interface Verdict {
   limitations: string;
   saferVersion?: string;
   aiUsed?: boolean;
-  deepScanStatus?: "full" | "busy" | "off"; // honest labeling of how much actually ran
+  deepScanStatus?: "full" | "busy" | "off" | "skipped";
 }
 
 // ── Legacy (V1) ────────────────────────────────────────────────
@@ -76,6 +76,6 @@ export interface CheckResponse {
   limitations: string;
   saferVersion?: string;
   aiUsed?: boolean;
-  deepScanStatus?: "full" | "busy" | "off"; // honest labeling of how much actually ran
+  deepScanStatus?: "full" | "busy" | "off" | "skipped";
 statusText?: string; // optional tool-specific wording (Link Check uses spec §8 labels)
 }

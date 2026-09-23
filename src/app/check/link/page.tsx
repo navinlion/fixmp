@@ -134,6 +134,24 @@ function LinkCheckInner() {
         </div>
       </form>
 
+      {/* Live scan card — shown only while the check request is in flight */}
+      {loading && (
+        <div className="mt-4 overflow-hidden rounded-2xl border border-blue-200 bg-white">
+          <div className="flex items-center justify-between border-b border-stone-100 px-4 py-2.5">
+            <p className="font-mono text-[10px] font-bold uppercase tracking-[0.2em] text-stone-500">
+              Analyzing link
+            </p>
+            <Loader2 size={14} className="animate-spin text-blue-600" aria-hidden="true" />
+          </div>
+          <div className="relative px-4 py-5">
+            <p className="break-all font-mono text-sm text-stone-800">{url}</p>
+            <div aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden">
+              <div className="scanline-x" />
+            </div>
+          </div>
+        </div>
+      )}
+
       {error && (
         <div role="alert" className="mt-6 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
           {error}

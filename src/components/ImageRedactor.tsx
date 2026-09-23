@@ -88,45 +88,53 @@ export default function ImageRedactor({ originalFile, removable, notRemovable }:
     return { cx, cy, cw, ch };
   }
 
+  const AI_PATCH_MAX_EDGE = 384; // smaller = much faster on CPU; quality still strong
+
   async function buildPatchAndMask(
     source: HTMLCanvasElement,
     region: { yMin: number; xMin: number; yMax: number; xMax: number },
     W: number,
     H: number
-  ): Promise<{ patch: string; mask: string; cx: number; cy: number } | null> {
+  ): Promise<{ patch: string; mask: string; cx: number; cy: number; cw: number; ch: number } | null> {
     const { cx, cy, cw, ch } = cropRect(region, W, H);
     if (cw < 16 || ch < 16) return null;
 
+    // Downscale large crops for fast CPU inference; result is stretched back on composite
+    const scale = Math.min(1, AI_PATCH_MAX_EDGE / Math.max(cw, ch));
+    const pw = Math.max(16, Math.round(cw * scale));
+    const ph = Math.max(16, Math.round(ch * scale));
+
     const patch = document.createElement("canvas");
-    patch.width = cw;
-    patch.height = ch;
+    patch.width = pw;
+    patch.height = ph;
     const pctx = patch.getContext("2d");
     if (!pctx) return null;
-    pctx.drawImage(source, cx, cy, cw, ch, 0, 0, cw, ch);
+    pctx.drawImage(source, cx, cy, cw, ch, 0, 0, pw, ph);
 
     const mask = document.createElement("canvas");
-    mask.width = cw;
-    mask.height = ch;
+    mask.width = pw;
+    mask.height = ph;
     const mctx = mask.getContext("2d");
     if (!mctx) return null;
     mctx.fillStyle = "#000";
-    mctx.fillRect(0, 0, cw, ch);
+    mctx.fillRect(0, 0, pw, ph);
 
-    const mx = Math.max(0, Math.round((region.xMin / 1000) * W - cx));
-    const my = Math.max(0, Math.round((region.yMin / 1000) * H - cy));
-    const mw = Math.min(cw - mx, Math.round(((region.xMax - region.xMin) / 1000) * W));
-    const mh = Math.min(ch - my, Math.round(((region.yMax - region.yMin) / 1000) * H));
+    // Mask coords in patch-local, scaled space
+    const mx = Math.max(0, Math.round(((region.xMin / 1000) * W - cx) * scale));
+    const my = Math.max(0, Math.round(((region.yMin / 1000) * H - cy) * scale));
+    const mw = Math.min(pw - mx, Math.max(4, Math.round(((region.xMax - region.xMin) / 1000) * W * scale)));
+    const mh = Math.min(ph - my, Math.max(4, Math.round(((region.yMax - region.yMin) / 1000) * H * scale)));
     const r = Math.max(8, Math.round(Math.min(mw, mh) * 0.15));
 
     mctx.fillStyle = "#fff";
-    mctx.fillRect(Math.max(0, mx - r / 2), Math.max(0, my - r / 2), Math.min(cw, mw + r), Math.min(ch, mh + r));
+    mctx.fillRect(Math.max(0, mx - r / 2), Math.max(0, my - r / 2), Math.min(pw, mw + r), Math.min(ph, mh + r));
     mctx.filter = `blur(${Math.round(r / 2)}px)`;
     mctx.drawImage(mask, 0, 0);
     mctx.filter = "none";
     mctx.fillStyle = "#fff";
     mctx.fillRect(mx, my, mw, mh);
 
-    return { patch: patch.toDataURL("image/png"), mask: mask.toDataURL("image/png"), cx, cy };
+    return { patch: patch.toDataURL("image/png"), mask: mask.toDataURL("image/png"), cx, cy, cw, ch };
   }
 
   /** Standard retouch: deterministic edge-interpolation fill, 100% local. */
@@ -245,6 +253,7 @@ export default function ImageRedactor({ originalFile, removable, notRemovable }:
 
     setWorking(true);
     setError("");
+    setResultUrl(null); // a new attempt invalidates any previous preview
 
     try {
       const chosen = removable.filter((f) => selected.has(f.id));
@@ -282,7 +291,7 @@ export default function ImageRedactor({ originalFile, removable, notRemovable }:
           const filled = new Image();
           filled.src = data.image;
           await filled.decode();
-          ctx.drawImage(filled, pm.cx, pm.cy);
+          ctx.drawImage(filled, pm.cx, pm.cy, pm.cw, pm.ch);
           aiSucceeded = true;
         } else {
           retouchRegionLocal(ctx, canvas, f.region, canvas.width, canvas.height);

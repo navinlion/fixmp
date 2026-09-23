@@ -11,7 +11,7 @@ import { toVerdict } from "@/lib/adapter";
 import { LIMITS } from "@/config/flags";
 import type { Verdict } from "@/types/check";
 import {
-  ArrowLeft, Camera, CheckCircle2, Eye, FileImage, ImageIcon, Loader2,
+  ArrowLeft, ArrowRight, Camera, CheckCircle2, Eye, FileImage, ImageIcon, Loader2,
   ScanFace, ScanSearch, Upload, X,
 } from "lucide-react";
 
@@ -185,12 +185,20 @@ export default function PhotoCheckPage() {
                   <X size={13} /> Remove
                 </button>
               </div>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={previewUrl}
-                alt="Photo to be checked"
-                className="mt-3 max-h-[420px] w-full rounded-xl border border-stone-200 object-contain"
-              />
+              <div className="relative mt-3">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={previewUrl}
+                  alt="Photo to be checked"
+                  className="max-h-[420px] w-full rounded-xl border border-stone-200 object-contain"
+                />
+                {loading && (
+                  <div aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden rounded-xl">
+                    <div className="absolute inset-0 bg-blue-500/5" />
+                    <div className="scanline" />
+                  </div>
+                )}
+              </div>
 
               <button
                 onClick={handleCheck}
@@ -250,11 +258,22 @@ export default function PhotoCheckPage() {
                   category: f.category,
                   description: f.description,
                   severity: f.severity,
+                  region: f.region,
                 }))}
                 notRemovable={notRemovable}
               />
             </>
           )}
+          <Link
+            href="/check/forensics"
+            className="mt-6 flex items-center justify-between rounded-xl border border-stone-200 bg-white p-4 text-sm transition-all hover:border-amber-400"
+          >
+            <span>
+              <strong className="text-stone-900">Want to see what&apos;s hidden in the file itself?</strong>
+              <span className="block text-stone-500">Media Forensics — metadata, hashes, steganography indicators. Free, local, always available.</span>
+            </span>
+            <ArrowRight size={16} className="shrink-0 text-stone-400" aria-hidden="true" />
+          </Link>
 
           <p className="mt-10 flex items-center justify-center gap-2 text-center text-xs text-stone-400">
             <Eye size={13} aria-hidden="true" />

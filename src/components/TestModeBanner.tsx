@@ -11,7 +11,7 @@ export default function TestModeBanner() {
           <span className="font-bold text-amber-400">TEST BUILD</span>
           {" "}— free while testing. Nothing you enter is stored.
           {AI_ENABLED
-            ? " Checks with AI analysis are processed on our server and by Google Gemini."
+            ? " Checks with deep AI analysis are processed on our server by an external AI service."
             : ""}
         </span>
       </div>

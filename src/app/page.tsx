@@ -12,7 +12,7 @@ import type { Verdict } from "@/types/check";
 import {
   Send, Bot, Link as LinkIcon, Image as ImageIcon, Lock, AlertTriangle,
   Mic, Camera, FileText, ScanSearch, ArrowRight, RotateCcw, CheckCircle2,
-  ShieldCheck, EyeOff, FlaskConical, type LucideIcon,
+  ShieldCheck, EyeOff, FlaskConical, Fingerprint, type LucideIcon,
 } from "lucide-react";
 
 type Tool = { icon: LucideIcon; title: string; description: string; href: string; tone: ToolTone };
@@ -24,6 +24,7 @@ const tools: Tool[] = [
   { icon: ImageIcon, title: "Share Photo", description: "Find things you may have missed — documents, screens, notifications and reflections in the background.", href: "/check/photo", tone: "amber" },
   { icon: Lock, title: "Share Info", description: "Check what personal information you're exposing — see exactly what you're handing over, and to whom.", href: "/check/ai", tone: "rose" },
   { icon: AlertTriangle, title: "Do Something", description: "Check before you act — not sure which check fits? Start here and FixMP will point you the right way.", href: "/check/ai", tone: "slate" },
+  { icon: Fingerprint, title: "Media Forensics", description: "Metadata, hashes, statistics and steganography indicators for an image — computed entirely on your device, no AI used.", href: "/check/forensics", tone: "slate" },
 ];
 
 const quickActions: { icon: LucideIcon; label: string; href: string | null }[] = [

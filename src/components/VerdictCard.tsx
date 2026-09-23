@@ -64,9 +64,16 @@ export default function VerdictCard({ verdict, onReset }: VerdictCardProps) {
         <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.2em] text-stone-500">
           {verdict.tool} · confidence {Math.round(verdict.confidence * 100)}%
         </p>
-        {partial && !partialOnly && (
+                {partial && !partialOnly && (
           <p className="mt-3 rounded-lg border border-amber-300 bg-amber-100/60 px-3 py-2 text-xs font-medium text-amber-800">
-            Note: the deep scan couldn&apos;t run for this check — image-level risks may be missing. Try again shortly for the full scan.
+            Note: the deep scan couldn&apos;t run for this check — context, tone and image-level
+            risks may be missing. Try again shortly for the full scan.
+          </p>
+        )}
+        {verdict.deepScanStatus === "skipped" && (
+          <p className="mt-3 rounded-lg border border-stone-200 bg-stone-100/60 px-3 py-2 text-xs font-medium text-stone-600">
+            Deep AI review wasn&apos;t requested for this check. Turn on
+            &ldquo;Deep AI analysis&rdquo; before checking for contextual review.
           </p>
         )}
       </div>
@@ -160,8 +167,8 @@ export default function VerdictCard({ verdict, onReset }: VerdictCardProps) {
       <p className="flex items-start gap-2 px-1 text-xs leading-relaxed text-stone-500">
         <Server size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
         {verdict.aiUsed
-          ? "For this check, your content was processed on FixMP's server and by our AI provider (Google Gemini). Nothing was stored."
-          : "For this check, your content was processed on FixMP's server using local pattern checks. Nothing was stored."}
+  ? "For this check, your content was processed on FixMP's server with advanced AI analysis. Nothing was stored."
+  : "For this check, your content was processed on FixMP's server using local analysis. Nothing was stored."}
       </p>
 
       {/* Limitations */}

@@ -57,6 +57,7 @@ export default function PostCheckPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [dragOver, setDragOver] = useState(false);
+  const [deepScan, setDeepScan] = useState(false);
   const originalNameRef = useRef<string>("");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const resultRef = useRef<HTMLDivElement>(null);
@@ -108,7 +109,7 @@ export default function PostCheckPage() {
       const res = await fetch("/api/check/post", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ textContent: text, imageBase64: analysis ?? "" }),
+        body: JSON.stringify({ textContent: text, imageBase64: analysis ?? "", deepScan }),
       });
       const data = await res.json();
 
@@ -156,15 +157,10 @@ export default function PostCheckPage() {
               <EyeOff size={13} className="text-amber-600" aria-hidden="true" /> Nothing stored
             </span>
             <span className="flex items-center gap-1.5">
-              {AI_ENABLED ? (
-                <>
-                  <Server size={13} className="text-blue-600" aria-hidden="true" /> Server + Gemini · nothing stored
-                </>
-              ) : (
-                <>
-                  <Zap size={13} className="text-blue-600" aria-hidden="true" /> Result in seconds
-                </>
-              )}
+              <Zap size={13} className="text-blue-600" aria-hidden="true" /> Local checks in seconds
+            </span>
+            <span className="flex items-center gap-1.5">
+              <Server size={13} className="text-blue-600" aria-hidden="true" /> AI only on request
             </span>
           </div>
 
@@ -236,6 +232,12 @@ export default function PostCheckPage() {
                 <div className="relative mt-3 max-h-64 overflow-hidden rounded-xl border border-stone-200 bg-stone-50">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img src={previewUrl} alt="Image attached to the post" className="max-h-64 w-full object-contain" />
+                  {loading && (
+                    <div aria-hidden="true" className="pointer-events-none absolute inset-0">
+                      <div className="scanline" />
+                    </div>
+                  )}
+
                   <button
                     type="button"
                     onClick={clearImage}
@@ -274,6 +276,26 @@ export default function PostCheckPage() {
               </div>
             </div>
 
+            {/* Optional deep scan — user opt-in, default OFF */}
+            {AI_ENABLED && (
+              <label className="mt-5 flex cursor-pointer items-start gap-3 rounded-xl border border-stone-200 bg-stone-50 p-4 transition-colors hover:border-amber-300">
+                <input
+                  type="checkbox"
+                  checked={deepScan}
+                  onChange={(e) => setDeepScan(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 accent-amber-600"
+                />
+               <span className="text-sm">
+  <span className="font-bold text-stone-900">Enhanced AI analysis</span>
+  <span className="block text-stone-500">
+    Optional. Off (default): your caption is checked using local analysis rules
+    and your image stays on your device. On: advanced AI analysis is used to
+    better understand your post, including its context and visual details.
+  </span>
+</span>
+              </label>
+            )}
+
             <button
               type="submit"
               disabled={loading || (!text.trim() && !analysis)}
@@ -282,7 +304,7 @@ export default function PostCheckPage() {
               {loading ? (
                 <>
                   <Loader2 size={17} className="animate-spin" aria-hidden="true" />
-                  {analysis ? "Checking post + image…" : "Checking your post…"}
+                  {deepScan ? "Checking + deep analysis…" : analysis ? "Checking post + image…" : "Checking your post…"}
                 </>
               ) : (
                 <>
@@ -291,9 +313,9 @@ export default function PostCheckPage() {
               )}
             </button>
 
-            {analysis && (
+            {analysis && !deepScan && (
               <p className="mt-3 flex items-center justify-center gap-1.5 text-center font-mono text-[10px] uppercase tracking-[0.15em] text-stone-400">
-                <FileImage size={12} aria-hidden="true" /> a resized copy is analyzed — your original file stays on your device
+                <FileImage size={12} aria-hidden="true" /> resized copy analyzed locally; the image itself is not uploaded when deep scan is off
               </p>
             )}
           </form>
