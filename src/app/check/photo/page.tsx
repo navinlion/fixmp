@@ -11,9 +11,11 @@ import { toVerdict } from "@/lib/adapter";
 import { LIMITS } from "@/config/flags";
 import type { Verdict } from "@/types/check";
 import {
-  ArrowLeft, ArrowRight, Camera, CheckCircle2, Eye, FileImage, ImageIcon, Loader2,
-  ScanFace, ScanSearch, Upload, X,
+  ArrowLeft, ArrowRight, CheckCircle2, Eye, ImageIcon, Loader2,
+  Scan, ScanSearch, X,
 } from "lucide-react";
+
+const MAX_EDGE = 1600; // analysis copy is downscaled; redaction uses the original
 
 const SELF_CHECK = [
   "Documents, letters, ID cards or packages in the background",
@@ -25,8 +27,6 @@ const SELF_CHECK = [
   "Other people — especially children — who didn't agree to be posted",
   "Anything you'd only recognise as sensitive because you were there",
 ];
-
-const MAX_EDGE = 1600; // analysis copy is downscaled; redaction uses the original
 
 async function makeAnalysisCopy(file: File): Promise<string> {
   const url = URL.createObjectURL(file);
@@ -107,9 +107,7 @@ export default function PhotoCheckPage() {
       if (data.status === "AI_OFF") {
         setAiOff(true);
       } else {
-        setVerdict(
-          toVerdict(data, originalFileRef.current?.name ?? "photo", "Photo check")
-        );
+        setVerdict(toVerdict(data, originalFileRef.current?.name ?? "photo", "Photo check"));
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong. Please try again.");
@@ -141,83 +139,99 @@ export default function PhotoCheckPage() {
             </p>
           </div>
 
-          {/* Upload zone */}
-          {!previewUrl ? (
-            <div
-              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-              onDragLeave={() => setDragOver(false)}
-              onDrop={(e) => { e.preventDefault(); setDragOver(false); handleFile(e.dataTransfer.files?.[0]); }}
-              className={`mt-8 flex min-h-[280px] cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed p-8 text-center transition-all ${
-                dragOver ? "border-amber-500 bg-amber-50" : "border-stone-300 bg-white hover:border-amber-400"
-              }`}
-              onClick={() => inputRef.current?.click()}
-              role="button"
-              tabIndex={0}
-              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") inputRef.current?.click(); }}
-              aria-label="Upload a photo to check"
-            >
-              <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-amber-100 text-amber-700">
-                <ImageIcon size={26} aria-hidden="true" />
-              </span>
-              <p className="mt-4 text-lg font-bold text-stone-900">Drop a photo here</p>
-              <p className="mt-1 text-sm text-stone-500">or tap to choose — JPG, PNG or WebP, up to {LIMITS.MAX_IMAGE_SIZE_MB}MB</p>
-              <p className="mt-4 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.15em] text-stone-400">
-                <Camera size={12} /> your photo never leaves your device unprocessed
-              </p>
-              <input
-                ref={inputRef}
-                type="file"
-                accept="image/*"
-                className="hidden"
-                onChange={(e) => handleFile(e.target.files?.[0])}
-              />
-            </div>
-          ) : (
-            <div className="mt-8 rounded-2xl border border-stone-200 bg-white p-5 shadow-xl shadow-stone-900/5 sm:p-6">
-              <div className="flex items-center justify-between">
-                <p className="font-mono text-[11px] font-bold uppercase tracking-[0.2em] text-stone-500">
-                  Your photo
-                </p>
-                <button
-                  onClick={clearAll}
-                  className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-stone-200 px-3 py-1.5 text-xs font-semibold text-stone-600 transition-all hover:border-red-300 hover:text-red-600"
-                >
-                  <X size={13} /> Remove
-                </button>
-              </div>
-              <div className="relative mt-3">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={previewUrl}
-                  alt="Photo to be checked"
-                  className="max-h-[420px] w-full rounded-xl border border-stone-200 object-contain"
-                />
-                {loading && (
-                  <div aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden rounded-xl">
-                    <div className="absolute inset-0 bg-blue-500/5" />
-                    <div className="scanline" />
-                  </div>
-                )}
-              </div>
-
-              <button
-                onClick={handleCheck}
-                disabled={loading || !analysis}
-                className="mt-5 flex h-14 w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-stone-900 text-sm font-bold uppercase tracking-wider text-white shadow-sm transition-all hover:bg-stone-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-stone-300"
+          {/* ===== SCANNER CONSOLE (dark) ===== */}
+          <div className="scanner-bg mt-8 flex min-h-[380px] flex-col items-center justify-center rounded-3xl p-6 shadow-2xl sm:p-10">
+            {!previewUrl ? (
+              <div
+                onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={(e) => { e.preventDefault(); setDragOver(false); handleFile(e.dataTransfer.files?.[0]); }}
+                onClick={() => inputRef.current?.click()}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") inputRef.current?.click(); }}
+                aria-label="Upload a photo to check"
+                className={`w-full max-w-lg cursor-pointer rounded-2xl border-2 border-dashed p-8 text-center transition-all ${
+                  dragOver ? "border-amber-400 bg-amber-400/10" : "border-stone-600 hover:border-amber-400/70 hover:bg-stone-800/40"
+                }`}
               >
-                {loading ? (
-                  <>
-                    <Loader2 size={17} className="animate-spin" aria-hidden="true" />
-                    Examining your photo — this can take 10–30 seconds
-                  </>
+                <span className="mx-auto flex h-14 w-14 items-center justify-center rounded-full border border-stone-600 bg-stone-800">
+                  <ImageIcon size={26} className="text-amber-400" aria-hidden="true" />
+                </span>
+                <p className="tech-text mt-4 text-lg font-bold text-white">Drop photo to scan</p>
+                <p className="mt-1 text-sm text-stone-400">
+                  or tap to choose — JPG, PNG or WebP, up to {LIMITS.MAX_IMAGE_SIZE_MB}MB
+                </p>
+                <input
+                  ref={inputRef}
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  className="hidden"
+                  onChange={(e) => handleFile(e.target.files?.[0])}
+                />
+              </div>
+            ) : (
+              <>
+                <div className="relative mx-auto w-full max-w-2xl overflow-hidden rounded-xl border border-stone-700 bg-black">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={previewUrl}
+                    alt="Photo to be checked"
+                    className={`max-h-[420px] w-full object-contain transition-all duration-500 ${loading ? "opacity-40 grayscale" : "opacity-100"}`}
+                  />
+
+                  {loading && (
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <div className="absolute inset-0 bg-slate-950/60 backdrop-blur-sm" />
+                      <div className="scanner-ring" />
+                      <div className="scanner-bracket bracket-tl" />
+                      <div className="scanner-bracket bracket-tr" />
+                      <div className="scanner-bracket bracket-bl" />
+                      <div className="scanner-bracket bracket-br" />
+                      <div className="scan-beam" />
+                      <div className="relative z-20 flex flex-col items-center">
+                        <div className="tech-text animate-pulse text-lg font-bold text-blue-400">Scanning</div>
+                        <div className="tech-text mt-1 text-xs text-stone-400">Analyzing the full frame…</div>
+                      </div>
+                    </div>
+                  )}
+
+                  {!loading && (
+                    <button
+                      onClick={clearAll}
+                      aria-label="Remove photo"
+                      className="absolute right-3 top-3 rounded-full border border-stone-600 bg-black/60 p-2 text-white backdrop-blur-md transition-colors hover:border-red-500 hover:bg-red-600"
+                    >
+                      <X size={16} />
+                    </button>
+                  )}
+                </div>
+
+                {!loading ? (
+                  <button
+                    onClick={handleCheck}
+                    disabled={!analysis}
+                    className="group mt-8 flex items-center gap-3 rounded-xl bg-amber-500 px-8 py-4 font-bold text-stone-950 shadow-lg shadow-amber-500/20 transition-all hover:bg-amber-400 active:scale-95 disabled:cursor-not-allowed disabled:bg-stone-700 disabled:text-stone-400"
+                  >
+                    <Scan size={20} className="transition-transform group-hover:rotate-12" aria-hidden="true" />
+                    <span className="tech-text text-base tracking-widest">Initiate scan</span>
+                  </button>
                 ) : (
-                  <>
-                    <ScanSearch size={17} /> Did I miss anything?
-                  </>
+                  <button
+                    disabled
+                    className="mt-8 flex items-center gap-3 rounded-xl border border-stone-700 bg-stone-800 px-8 py-4 font-bold text-stone-400"
+                  >
+                    <Loader2 size={20} className="animate-spin" aria-hidden="true" />
+                    <span className="tech-text text-base tracking-widest">Processing…</span>
+                  </button>
                 )}
-              </button>
-            </div>
-          )}
+
+                <p className="mt-4 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.15em] text-stone-500">
+                  <Eye size={12} aria-hidden="true" /> a resized copy is analyzed — your original file stays on your device
+                </p>
+              </>
+            )}
+          </div>
 
           {error && (
             <div role="alert" className="mt-6 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
@@ -264,6 +278,7 @@ export default function PhotoCheckPage() {
               />
             </>
           )}
+
           <Link
             href="/check/forensics"
             className="mt-6 flex items-center justify-between rounded-xl border border-stone-200 bg-white p-4 text-sm transition-all hover:border-amber-400"
@@ -274,11 +289,6 @@ export default function PhotoCheckPage() {
             </span>
             <ArrowRight size={16} className="shrink-0 text-stone-400" aria-hidden="true" />
           </Link>
-
-          <p className="mt-10 flex items-center justify-center gap-2 text-center text-xs text-stone-400">
-            <Eye size={13} aria-hidden="true" />
-            A resized copy is analysed on our server; the safe copy is created locally in your browser.
-          </p>
         </section>
       </main>
       <Footer />

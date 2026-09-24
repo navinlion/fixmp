@@ -61,7 +61,7 @@ export async function analyzeImage(imageDataUrl: string, note?: string): Promise
   const messages = buildMessages(imageDataUrl, note);
   const params = {
     schema: photoAnalysisSchema,
-    maxRetries: 2,
+    maxRetries: 0, // free-tier testing: each SDK retry burns quota; our own fallback handles resilience
     abortSignal: AbortSignal.timeout(AI_TIMEOUT_MS),
   };
 

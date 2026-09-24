@@ -65,3 +65,103 @@ html {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* --- FIXMP SCANNER THEME --- */
+
+/* Dark Scanner Background */
+.scanner-bg {
+  background-color: #020617; /* Slate 950 */
+  background-image: 
+    radial-gradient(circle at 50% 50%, rgba(30, 41, 59, 0.5) 0%, transparent 70%),
+    linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+  background-size: 100% 100%, 40px 40px, 40px 40px;
+}
+
+/* The Glowing Rotating Ring */
+@keyframes scanner-ring-rotate {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.scanner-ring {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 80%;
+  height: 80%;
+  max-width: 400px;
+  max-height: 400px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  border-top-color: #3b82f6; /* Blue 500 */
+  border-right-color: #3b82f6;
+  box-shadow: 0 0 20px rgba(59, 130, 246, 0.5), inset 0 0 20px rgba(59, 130, 246, 0.2);
+  animation: scanner-ring-rotate 3s linear infinite;
+  pointer-events: none;
+}
+
+.scanner-ring::after {
+  content: '';
+  position: absolute;
+  top: -2px;
+  left: -2px;
+  right: -2px;
+  bottom: -2px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  border-bottom-color: #60a5fa; /* Blue 400 */
+  border-left-color: #60a5fa;
+  animation: scanner-ring-rotate 2s linear infinite reverse;
+}
+
+/* The Sweeping Scan Beam */
+@keyframes scan-beam {
+  0% { top: 0%; opacity: 0; }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  100% { top: 100%; opacity: 0; }
+}
+
+.scan-beam {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 4px;
+  background: linear-gradient(to right, transparent, #3b82f6, transparent);
+  box-shadow: 0 0 15px 2px #3b82f6;
+  animation: scan-beam 2s ease-in-out infinite;
+  pointer-events: none;
+  z-index: 10;
+}
+
+/* Pulsing Corner Brackets */
+@keyframes bracket-pulse {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; box-shadow: 0 0 10px #3b82f6; }
+}
+
+.scanner-bracket {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  border-color: #60a5fa;
+  border-style: solid;
+  border-width: 0;
+  animation: bracket-pulse 1.5s ease-in-out infinite;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.bracket-tl { top: 10%; left: 10%; border-top-width: 3px; border-left-width: 3px; border-top-left-radius: 8px; }
+.bracket-tr { top: 10%; right: 10%; border-top-width: 3px; border-right-width: 3px; border-top-right-radius: 8px; }
+.bracket-bl { bottom: 10%; left: 10%; border-bottom-width: 3px; border-left-width: 3px; border-bottom-left-radius: 8px; }
+.bracket-br { bottom: 10%; right: 10%; border-bottom-width: 3px; border-right-width: 3px; border-bottom-right-radius: 8px; }
+
+/* Tech Text */
+.tech-text {
+  font-family: monospace;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
