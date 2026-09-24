@@ -49,7 +49,8 @@ export default function PhotoCheckPage() {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState<string | null>(null);
   const [verdict, setVerdict] = useState<Verdict | null>(null);
-  const [aiOff, setAiOff] = useState(false);
+  const [deepScan, setDeepScan] = useState(false);
+  const [selfCheck, setSelfCheck] = useState<null | "voluntary" | "aiOff">(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [dragOver, setDragOver] = useState(false);
@@ -60,7 +61,8 @@ export default function PhotoCheckPage() {
     setPreviewUrl(null);
     setAnalysis(null);
     setVerdict(null);
-    setAiOff(false);
+    setDeepScan(false);
+    setSelfCheck(null);
     setError("");
     originalFileRef.current = null;
     if (inputRef.current) inputRef.current.value = "";
@@ -78,7 +80,7 @@ export default function PhotoCheckPage() {
     }
     setError("");
     setVerdict(null);
-    setAiOff(false);
+    setSelfCheck(null);
     originalFileRef.current = file; // stays in the browser — used only for the safe copy
     setPreviewUrl(URL.createObjectURL(file));
     try {
@@ -89,23 +91,34 @@ export default function PhotoCheckPage() {
   }
 
   async function handleCheck() {
-    if (!analysis || loading) return;
+    if (loading) return;
+
+    // Default path — local self-check: ZERO network requests, ZERO upload.
+    if (!deepScan) {
+      setVerdict(null);
+      setSelfCheck("voluntary");
+      return;
+    }
+
+    if (!analysis) return;
     setLoading(true);
     setError("");
     setVerdict(null);
-    setAiOff(false);
+    setSelfCheck(null);
 
     try {
       const res = await fetch("/api/check/photo", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ imageBase64: analysis }),
+        body: JSON.stringify({ imageBase64: analysis, deepScan: true }),
       });
       const data = await res.json();
 
       if (!res.ok) throw new Error(data.error || "Something went wrong while checking this photo. Please try again.");
       if (data.status === "AI_OFF") {
-        setAiOff(true);
+        setSelfCheck("aiOff");
+      } else if (data.status === "SKIPPED") {
+        setSelfCheck("voluntary");
       } else {
         setVerdict(toVerdict(data, originalFileRef.current?.name ?? "photo", "Photo check"));
       }
@@ -207,19 +220,43 @@ export default function PhotoCheckPage() {
                   )}
                 </div>
 
+                {/* Deep scan opt-in — default OFF: nothing is uploaded unless requested */}
+                <label className="mt-6 flex w-full max-w-lg cursor-pointer items-start gap-3 rounded-xl border border-stone-700 bg-stone-900/60 p-4 transition-colors hover:border-amber-400/60">
+                  <input
+                    type="checkbox"
+                    checked={deepScan}
+                    onChange={(e) => setDeepScan(e.target.checked)}
+                    className="mt-0.5 h-4 w-4 accent-amber-500"
+                  />
+                  <span className="text-sm">
+                    <span className="font-bold text-white">Deep AI scan</span>
+                    <span className="block text-stone-400">
+                      Optional. Off (default): the self-check runs in your browser — nothing is
+                      uploaded anywhere. On: a resized copy of your photo is analyzed in depth by
+                      an external AI service.
+                    </span>
+                  </span>
+                </label>
+
                 {!loading ? (
                   <button
                     onClick={handleCheck}
                     disabled={!analysis}
-                    className="group mt-8 flex items-center gap-3 rounded-xl bg-amber-500 px-8 py-4 font-bold text-stone-950 shadow-lg shadow-amber-500/20 transition-all hover:bg-amber-400 active:scale-95 disabled:cursor-not-allowed disabled:bg-stone-700 disabled:text-stone-400"
+                    className="group mt-6 flex items-center gap-3 rounded-xl bg-amber-500 px-8 py-4 font-bold text-stone-950 shadow-lg shadow-amber-500/20 transition-all hover:bg-amber-400 active:scale-95 disabled:cursor-not-allowed disabled:bg-stone-700 disabled:text-stone-400"
                   >
-                    <Scan size={20} className="transition-transform group-hover:rotate-12" aria-hidden="true" />
-                    <span className="tech-text text-base tracking-widest">Initiate scan</span>
+                    {deepScan ? (
+                      <Scan size={20} className="transition-transform group-hover:rotate-12" aria-hidden="true" />
+                    ) : (
+                      <ScanSearch size={20} aria-hidden="true" />
+                    )}
+                    <span className="tech-text text-base tracking-widest">
+                      {deepScan ? "Deep AI scan" : "Local self-check"}
+                    </span>
                   </button>
                 ) : (
                   <button
                     disabled
-                    className="mt-8 flex items-center gap-3 rounded-xl border border-stone-700 bg-stone-800 px-8 py-4 font-bold text-stone-400"
+                    className="mt-6 flex items-center gap-3 rounded-xl border border-stone-700 bg-stone-800 px-8 py-4 font-bold text-stone-400"
                   >
                     <Loader2 size={20} className="animate-spin" aria-hidden="true" />
                     <span className="tech-text text-base tracking-widest">Processing…</span>
@@ -227,7 +264,10 @@ export default function PhotoCheckPage() {
                 )}
 
                 <p className="mt-4 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.15em] text-stone-500">
-                  <Eye size={12} aria-hidden="true" /> a resized copy is analyzed — your original file stays on your device
+                  <Eye size={12} aria-hidden="true" />
+                  {deepScan
+                    ? "a resized copy is analyzed — your original file stays on your device"
+                    : "runs entirely in your browser — nothing is uploaded"}
                 </p>
               </>
             )}
@@ -239,15 +279,18 @@ export default function PhotoCheckPage() {
             </div>
           )}
 
-          {/* Graceful AI-off mode: the honest self-check */}
-          {aiOff && (
+          {/* Local self-check — shown for the voluntary default path OR admin-disabled AI */}
+          {selfCheck && (
             <div className="mt-8 rounded-2xl border border-amber-200 bg-amber-50/60 p-5 sm:p-6">
               <h2 className="text-lg font-extrabold tracking-tight text-stone-900">
-                Deep scan is switched off right now
+                {selfCheck === "voluntary"
+                  ? "Local self-check — nothing was uploaded"
+                  : "Deep scan is switched off right now"}
               </h2>
               <p className="mt-1.5 text-sm leading-relaxed text-stone-600">
-                Instead of pretending, here&apos;s the exact checklist FixMP&apos;s AI uses.
-                Give your photo 30 honest seconds against it:
+                {selfCheck === "voluntary"
+                  ? "Here is the exact checklist the deep scan uses. Give your photo 30 honest seconds against it — or turn on Deep AI scan above and run the full analysis:"
+                  : "Instead of pretending, here's the exact checklist FixMP's deep scan uses. Give your photo 30 honest seconds against it:"}
               </p>
               <ul className="mt-4 space-y-2.5">
                 {SELF_CHECK.map((item) => (

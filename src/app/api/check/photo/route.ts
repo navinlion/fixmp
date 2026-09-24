@@ -11,6 +11,15 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const imageBase64: unknown = body?.imageBase64;
     const note: unknown = body?.note;
+    const deepScanRequested: boolean = body?.deepScan === true;
+
+    // 0. Opt-in gate (spec §13/§20): deep analysis runs ONLY when explicitly
+    //    requested. The default local self-check never reaches this route
+    //    (the client handles it in-browser); this server-side gate is
+    //    defense in depth against uninvited uploads.
+    if (!deepScanRequested) {
+      return NextResponse.json({ status: "SKIPPED" });
+    }
 
     // 1. Validate input (spec §21 — never trust the client)
     if (typeof imageBase64 !== "string" || !imageBase64.startsWith("data:image/")) {
@@ -36,8 +45,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ status: "AI_OFF" });
     }
 
-    // 3. Analyze — the ONLY tier. If it fails, the user gets an honest error,
-    //    never a partial result dressed as a complete one.
+    // 3. Analyze — the ONLY deep tier. If it fails, the user gets an honest
+    //    error, never a partial result dressed as a complete one.
     const response = await analyzeImage(
       imageBase64,
       typeof note === "string" && note.trim() ? note.trim().slice(0, 300) : undefined
