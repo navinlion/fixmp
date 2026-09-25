@@ -29,6 +29,16 @@ function FindingRow({ f, onHighlight }: { f: LocalFinding; onHighlight: (f: Loca
         <span>source: {f.source}</span>
       </div>
       <p className="mt-1.5 text-sm text-stone-600">{f.description}</p>
+      {f.value && f.type !== "qr" && (
+        <p className="mt-1.5 break-all rounded-lg bg-stone-50 px-2.5 py-1.5 font-mono text-[11px] text-stone-700">
+          content read: {f.value}
+        </p>
+      )}
+      {f.type === "qr" && f.value && (
+        <p className="mt-1.5 break-all rounded-lg bg-stone-50 px-2.5 py-1.5 font-mono text-[11px] text-stone-700">
+          decoded: {f.value.length > 120 ? f.value.slice(0, 120) + "…" : f.value}
+        </p>
+      )}
       <div className="mt-2 flex flex-wrap items-center gap-3">
         {f.region && (
           <button
@@ -85,6 +95,22 @@ interface Props {
   previewUrl: string;
 }
 
+/** Overall share-safety statement, driven by actual finding counts. */
+function SafetyVerdict({ findings }: { findings: LocalFinding[] }) {
+  const high = findings.filter((f) => f.severity === "high").length;
+  const med = findings.filter((f) => f.severity === "medium").length;
+  const low = findings.filter((f) => f.severity === "low").length;
+  if (findings.length === 0) return null;
+  const unsafe = high > 0;
+  return (
+    <div className={`rounded-xl border p-3 text-sm ${unsafe ? "border-red-300 bg-red-50 text-red-800" : "border-amber-300 bg-amber-50 text-amber-800"}`}>
+      {unsafe
+        ? <>⚠️ NOT SAFE to post publicly as-is. {findings.length} finding{findings.length === 1 ? "" : "s"} — {high} high-risk{med ? `, ${med} to review` : ""}. Remove flagged items or use the safe copy before posting.</>
+        : <>⚠️ REVIEW before posting. {findings.length} finding{findings.length === 1 ? "" : "s"} found — {med} need review{low ? `, ${low} low-risk` : ""}. Nothing here is an automatic all-clear for visible content.</>}
+    </div>
+  );
+}
+
 export default function LocalPhotoReport({ report, previewUrl }: Props) {
   const [highlight, setHighlight] = useState<LocalFinding | null>(null);
   const [diagOpen, setDiagOpen] = useState(false);
@@ -130,6 +156,9 @@ export default function LocalPhotoReport({ report, previewUrl }: Props) {
         )}
       </div>
 
+      {/* Overall share-safety verdict */}
+      <SafetyVerdict findings={report.findings} />
+
       {/* Findings (evidence map) */}
       {report.findings.length > 0 ? (
         <ul className="space-y-3">
@@ -150,8 +179,7 @@ export default function LocalPhotoReport({ report, previewUrl }: Props) {
           Detector status
         </p>
         <div className="mt-3 space-y-2">
-          <DetectorLine name="Text (OCR)" result={report.detectors.ocr} />
-          <DetectorLine name="Handwriting / ink" result={report.detectors.ink} />
+          <DetectorLine name="Text & handwriting regions (local model)" result={report.detectors.text} />
           <DetectorLine name="QR codes" result={report.detectors.qr} />
           <DetectorLine name="Metadata (EXIF/GPS)" result={report.detectors.metadata} />
         </div>

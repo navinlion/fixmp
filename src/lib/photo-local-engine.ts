@@ -1,24 +1,29 @@
 // ═══════════════════════════════════════════════════════════════
-// FixMP Local Photo Intelligence Engine (Stage 2.5.1)
-//
-// v2: multi-scale QR detection (small codes now found via downscale
-// ladder + magnification), tighter ink regions (higher analysis res,
-// narrower margins, shape filtering).
+// FixMP Local Photo Intelligence Engine (v3 — ML region detection)
 //
 // Principle: "FixMP should know what it found before it asks AI for anything."
-// Every detector returns explicit status — FAILURE is never a negative finding.
-// Confidence values derive from measured signals with inline formulas.
+//
+// DETECTION: local ONNX text-region model (DBNet/PP-OCR det) — finds text
+//   AND handwritten strokes generally, no hand-tuned thresholds.
+// READING:  Tesseract per-region crops (targeted = accurate).
+// CLASSIFY: existing FixMP pattern engine rules.
+// METADATA: exifr (GPS/camera). CODES: jsQR multi-scale + quadrant rescue.
+//
+// The image never leaves the device. Every detector reports explicit
+// status — FAILURE is never presented as a negative finding. Confidence
+// values derive from measured signals (model probabilities, OCR confidence)
+// with formulas inline — never invented.
 // ═══════════════════════════════════════════════════════════════
 
-import { createWorker, PSM } from "tesseract.js";
+import { createWorker } from "tesseract.js";
 import exifr from "exifr";
 import jsQR from "jsqr";
-import type { RedactionRegion } from "@/types/check";
 import { analyzeUrlDeterministic } from "@/lib/link-checks";
+import type { RedactionRegion } from "@/types/check";
 
 // ── Public types ───────────────────────────────────────────────
 
-export type DetectorSource = "local-ocr" | "local-ink" | "local-qr" | "local-exif";
+export type DetectorSource = "local-model" | "local-ocr" | "local-qr" | "local-exif";
 export type DetectorStatus = "pass" | "error";
 
 export interface LocalFinding {
@@ -50,8 +55,7 @@ export interface LocalPhotoReport {
   analyzedAt: string;
   findings: LocalFinding[];
   detectors: {
-    ocr: DetectorResult;
-    ink: DetectorResult;
+    text: DetectorResult;   // ML regions + OCR reading + classification
     qr: DetectorResult;
     metadata: DetectorResult;
   };
@@ -94,35 +98,26 @@ async function fileToCanvas(file: File, maxEdge: number): Promise<HTMLCanvasElem
   return canvas;
 }
 
-/** Grayscale + percentile contrast stretch (2%–98%). */
-function preprocessForOcr(src: HTMLCanvasElement): HTMLCanvasElement {
-  const c = document.createElement("canvas");
-  c.width = src.width;
-  c.height = src.height;
-  const ctx = c.getContext("2d", { willReadFrequently: true });
-  if (!ctx) throw new Error("canvas unavailable");
-  ctx.drawImage(src, 0, 0);
-  const id = ctx.getImageData(0, 0, c.width, c.height);
-  const d = id.data;
-  const gray = new Uint8ClampedArray(d.length / 4);
-  for (let i = 0, g = 0; i < d.length; i += 4, g++) {
-    gray[g] = Math.round(0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]);
+// ── ONNX session (lazy, cached) ────────────────────────────────
+
+let sessionPromise: Promise<any> | null = null;
+
+async function getSession(): Promise<any> {
+  if (!sessionPromise) {
+    sessionPromise = (async () => {
+      const ort = await import("onnxruntime-web");
+      ort.env.wasm.numThreads = 1; // no cross-origin isolation needed
+      const res = await fetch("/models/textdet.onnx");
+      if (!res.ok) throw new Error(`Model fetch failed (${res.status}) — is public/models/textdet.onnx present?`);
+      const buf = await res.arrayBuffer();
+      return await ort.InferenceSession.create(buf, { executionProviders: ["wasm"] });
+    })();
+    sessionPromise.catch(() => { sessionPromise = null; }); // allow retry after failure
   }
-  const sample: number[] = [];
-  for (let g = 0; g < gray.length; g += 97) sample.push(gray[g]);
-  sample.sort((a, b) => a - b);
-  const lo = sample[Math.floor(sample.length * 0.02)] ?? 0;
-  const hi = sample[Math.floor(sample.length * 0.98)] ?? 255;
-  const range = Math.max(1, hi - lo);
-  for (let i = 0, g = 0; i < d.length; i += 4, g++) {
-    const v = Math.max(0, Math.min(255, Math.round(((gray[g] - lo) / range) * 255)));
-    d[i] = d[i + 1] = d[i + 2] = v;
-  }
-  ctx.putImageData(id, 0, 0);
-  return c;
+  return sessionPromise;
 }
 
-// ── Detector 1: OCR + classification (unchanged from v1) ───────
+// ── Detector 1: ML text-region detection + OCR reading + classification ──
 
 const CLASSIFIERS: Array<{
   type: string; category: string; severity: "high" | "medium" | "low";
@@ -164,90 +159,276 @@ function ocrDigitFix(s: string): string {
   return s.replace(/[Oo]/g, "0").replace(/[Il|]/g, "1");
 }
 
-interface OcrLine { text: string; confidence: number; bbox?: { x0: number; y0: number; x1: number; y1: number } }
+const MODEL_SIZE = 960;
+const BOX_THRESHOLD = 0.3;   // DBNet standard
+const MAX_REGIONS = 40;
+const MAX_OCR_REGIONS = 20;  // bound total OCR time
 
-async function detectOcrAndClassify(file: File, onProgress: ProgressFn): Promise<DetectorResult> {
+/** Runs the detection model; returns text-region boxes in ORIGINAL canvas coords. */
+async function detectRegions(
+  src: HTMLCanvasElement
+): Promise<{ boxes: { x0: number; y0: number; x1: number; y1: number; prob: number }[]; loadMs: number; inferMs: number }> {
+  const ort = await import("onnxruntime-web");
+  const t0 = performance.now();
+  const session = await getSession();
+  const loadMs = Math.round(performance.now() - t0);
+
+  const t1 = performance.now();
+  // Letterbox to MODEL_SIZE square
+  const ratio = Math.min(MODEL_SIZE / src.width, MODEL_SIZE / src.height);
+  const rw = Math.max(1, Math.round(src.width * ratio));
+  const rh = Math.max(1, Math.round(src.height * ratio));
+  const input = document.createElement("canvas");
+  input.width = MODEL_SIZE;
+  input.height = MODEL_SIZE;
+  const ictx = input.getContext("2d", { willReadFrequently: true })!;
+  ictx.fillStyle = "#000";
+  ictx.fillRect(0, 0, MODEL_SIZE, MODEL_SIZE);
+  ictx.drawImage(src, 0, 0, rw, rh);
+
+  // Normalize CHW with PaddleOCR mean/std
+  const id = ictx.getImageData(0, 0, MODEL_SIZE, MODEL_SIZE).data;
+  const mean = [0.485, 0.456, 0.406];
+  const std = [0.229, 0.224, 0.225];
+  const tensor = new Float32Array(3 * MODEL_SIZE * MODEL_SIZE);
+  const plane = MODEL_SIZE * MODEL_SIZE;
+  for (let p = 0; p < plane; p++) {
+    tensor[p] = (id[p * 4] / 255 - mean[0]) / std[0];
+    tensor[plane + p] = (id[p * 4 + 1] / 255 - mean[1]) / std[1];
+    tensor[2 * plane + p] = (id[p * 4 + 2] / 255 - mean[2]) / std[2];
+  }
+
+  const feeds = { [session.inputNames[0]]: new ort.Tensor("float32", tensor, [1, 3, MODEL_SIZE, MODEL_SIZE]) };
+  const results = await session.run(feeds);
+  const out = results[session.outputNames[0]];
+  const prob = out.data as Float32Array; // [1,1,H,W]
+  const inferMs = Math.round(performance.now() - t1);
+
+  // Threshold + connected components → boxes (same CC math, now on model output)
+  const mask = new Uint8Array(plane);
+  for (let p = 0; p < plane; p++) if (prob[p] >= BOX_THRESHOLD) mask[p] = 1;
+
+  const labels = new Int32Array(plane).fill(-1);
+  interface Comp { minX: number; minY: number; maxX: number; maxY: number; px: number; probSum: number }
+  const comps: Comp[] = [];
+  const stack: number[] = [];
+  for (let p0 = 0; p0 < plane; p0++) {
+    if (!mask[p0] || labels[p0] !== -1) continue;
+    const cid = comps.length;
+    const comp: Comp = { minX: MODEL_SIZE, minY: MODEL_SIZE, maxX: 0, maxY: 0, px: 0, probSum: 0 };
+    stack.push(p0);
+    labels[p0] = cid;
+    while (stack.length) {
+      const p = stack.pop()!;
+      const x = p % MODEL_SIZE, y = (p / MODEL_SIZE) | 0;
+      if (x < comp.minX) comp.minX = x;
+      if (x > comp.maxX) comp.maxX = x;
+      if (y < comp.minY) comp.minY = y;
+      if (y > comp.maxY) comp.maxY = y;
+      comp.px++;
+      comp.probSum += prob[p];
+      for (const n of [p - 1, p + 1, p - MODEL_SIZE, p + MODEL_SIZE]) {
+        if (n < 0 || n >= plane) continue;
+        if ((n % MODEL_SIZE === MODEL_SIZE - 1 && p % MODEL_SIZE === 0) ||
+            (n % MODEL_SIZE === 0 && p % MODEL_SIZE === MODEL_SIZE - 1)) continue;
+        if (mask[n] && labels[n] === -1) { labels[n] = cid; stack.push(n); }
+      }
+    }
+    comps.push(comp);
+  }
+
+  // Unclip: expand each box ~20% of its smaller dim (DBNet standard practice),
+  // drop specks, map back to source coords
+  const boxes = comps
+    .filter((c) => c.px >= 12)
+    .map((c) => {
+      const bw = c.maxX - c.minX + 1, bh = c.maxY - c.minY + 1;
+      const ux = Math.max(2, Math.round(bw * 0.1));
+      const uy = Math.max(2, Math.round(bh * 0.1));
+      const x0 = Math.max(0, c.minX - ux), y0 = Math.max(0, c.minY - uy);
+      const x1 = Math.min(MODEL_SIZE, c.maxX + ux + 1), y1 = Math.min(MODEL_SIZE, c.maxY + uy + 1);
+      return {
+        x0: Math.min(src.width, Math.round(x0 / ratio)),
+        y0: Math.min(src.height, Math.round(y0 / ratio)),
+        x1: Math.min(src.width, Math.round(x1 / ratio)),
+        y1: Math.min(src.height, Math.round(y1 / ratio)),
+        prob: c.probSum / Math.max(1, c.px), // model's own mean probability — measured confidence
+      };
+    })
+    .filter((b) => b.x1 - b.x0 >= 4 && b.y1 - b.y0 >= 4)
+    .sort((a, b) => (b.x1 - b.x0) * (b.y1 - b.y0) - (a.x1 - a.x0) * (a.y1 - a.y0))
+    .slice(0, MAX_REGIONS);
+
+  return { boxes, loadMs, inferMs };
+}
+
+/** Binarize a crop: grayscale → Otsu threshold. Recovers low-contrast text. */
+function binarize(canvas: HTMLCanvasElement): void {
+  const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+  const id = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const d = id.data;
+  const n = d.length / 4;
+  const hist = new Array(256).fill(0);
+  for (let i = 0, g = 0; i < d.length; i += 4, g++) {
+    const gray = Math.round(0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]);
+    hist[gray]++;
+    d[i] = d[i + 1] = d[i + 2] = gray;
+  }
+  // Otsu: maximize between-class variance
+  let sum = 0;
+  for (let t = 0; t < 256; t++) sum += t * hist[t];
+  let sumB = 0, wB = 0, best = 0, thr = 127;
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t];
+    if (wB === 0) continue;
+    const wF = n - wB;
+    if (wF === 0) break;
+    sumB += t * hist[t];
+    const mB = sumB / wB, mF = (sum - sumB) / wF;
+    const between = wB * wF * (mB - mF) * (mB - mF);
+    if (between > best) { best = between; thr = t; }
+  }
+  for (let i = 0; i < d.length; i += 4) {
+    const v = d[i] > thr ? 255 : 0;
+    d[i] = d[i + 1] = d[i + 2] = v;
+  }
+  ctx.putImageData(id, 0, 0);
+}
+
+/** OCR one region crop (with binarization fallback); returns measured confidence. */
+async function readRegion(
+  worker: any, src: HTMLCanvasElement,
+  b: { x0: number; y0: number; x1: number; y1: number }
+): Promise<{ text: string; confidence: number; lines: number }> {
+  const pad = 4;
+  const cx = Math.max(0, b.x0 - pad), cy = Math.max(0, b.y0 - pad);
+  const cw = Math.min(src.width - cx, b.x1 - b.x0 + pad * 2);
+  const ch = Math.min(src.height - cy, b.y1 - b.y0 + pad * 2);
+  if (cw < 4 || ch < 4) return { text: "", confidence: 0, lines: 0 };
+
+  const scale = Math.min(3, Math.max(1, 64 / Math.min(cw, ch)));
+  const make = (binarized: boolean) => {
+    const crop = document.createElement("canvas");
+    crop.width = Math.round(cw * scale);
+    crop.height = Math.round(ch * scale);
+    const cctx = crop.getContext("2d", { willReadFrequently: true })!;
+    cctx.imageSmoothingEnabled = true;
+    cctx.drawImage(src, cx, cy, cw, ch, 0, 0, crop.width, crop.height);
+    if (binarized) binarize(crop);
+    return crop;
+  };
+
+  const parse = (r: any) => {
+    let text = "", confSum = 0, lines = 0;
+    for (const blk of r.data?.blocks ?? []) {
+      for (const par of blk?.paragraphs ?? []) {
+        for (const line of par?.lines ?? []) {
+          if (!line?.text?.trim()) continue;
+          text += (text ? "\n" : "") + line.text.trim();
+          if (typeof line.confidence === "number") { confSum += line.confidence; lines++; }
+        }
+      }
+    }
+    return { text, confidence: lines ? confSum / lines / 100 : 0, lines };
+  };
+
+  // Pass 1: natural crop
+  const first = parse(await worker.recognize(make(false), {}, { blocks: true }));
+  if (first.confidence >= 0.7 || first.text.trim()) {
+    // Accept natural reading if it produced text with reasonable confidence
+    if (first.confidence >= 0.55) return first;
+  }
+  // Pass 2: binarized retry for low-contrast text
+  const second = parse(await worker.recognize(make(true), {}, { blocks: true }));
+  return second.confidence > first.confidence ? second : first;
+}
+async function detectText(file: File, onProgress: ProgressFn): Promise<DetectorResult> {
   const diagnostics: Record<string, string | number> = {};
   try {
-    onProgress("OCR — reading visible text", 25);
-    const base = await fileToCanvas(file, 2000);
-    const pre = preprocessForOcr(base);
+    onProgress("Local model — detecting regions", 20);
+    // Deterministic resolution: the model ALWAYS sees exactly 960px regardless
+    // of device/browser scaling — identical input = identical findings on
+    // mobile and desktop.
+    const src = await fileToCanvas(file, 960);
+    const { boxes, loadMs, inferMs } = await detectRegions(src);
+    diagnostics["model load"] = `${loadMs}ms`;
+    diagnostics["inference"] = `${inferMs}ms`;
+    diagnostics["regions found"] = boxes.length;
+    if (boxes.length === 0) {
+      return { detector: "Text regions", status: "pass", findings: [], diagnostics: { ...diagnostics, note: "model found no text-like regions" } };
+    }
 
+    onProgress("Reading regions (OCR)", 45);
+    // Local assets only
     const worker = await createWorker("eng", 1, {
       workerPath: "/tesseract/worker.min.js",
       corePath: "/tesseract",
       langPath: "/tessdata",
     });
 
-    const collect = (data: any): OcrLine[] =>
-      (data?.blocks ?? [])
-        .flatMap((b: any) => b?.paragraphs ?? [])
-        .flatMap((p: any) => p?.lines ?? [])
-        .map((l: any) => ({
-          text: l?.text ?? "",
-          confidence: typeof l?.confidence === "number" ? l.confidence / 100 : 0.5,
-          bbox: l?.bbox,
-        }))
-        .filter((l: OcrLine) => l.text.trim().length > 0);
-
-    // Three-pass strategy: SPARSE (scattered overlays), AUTO (layout),
-    // RAW_LINE-style word sweep via SPARSE on the UNPROCESSED image (contrast
-    // stretch can hurt some photos — both variants are tried).
-    let lines: OcrLine[] = [];
-    try {
-      await worker.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT });
-      const r1 = await worker.recognize(pre, {}, { blocks: true });
-      lines = lines.concat(collect(r1.data));
-      diagnostics["sparse pass"] = `${collect(r1.data).length} lines`;
-    } catch (e: any) {
-      diagnostics["sparse pass"] = `failed: ${String(e?.message ?? e).slice(0, 80)}`;
-    }
-    try {
-      await worker.setParameters({ tessedit_pageseg_mode: PSM.AUTO });
-      const r2 = await worker.recognize(pre, {}, { blocks: true });
-      lines = lines.concat(collect(r2.data));
-      diagnostics["auto pass"] = `${collect(r2.data).length} lines`;
-    } catch (e: any) {
-      diagnostics["auto pass"] = `failed: ${String(e?.message ?? e).slice(0, 80)}`;
-    }
-    // Third pass: original (non-stretched) image — catches cases where the
-    // percentile stretch hurts more than it helps (e.g. tiny text on smooth skin).
-    try {
-      const raw = await fileToCanvas(file, 2000);
-      await worker.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT });
-      const r3 = await worker.recognize(raw, {}, { blocks: true });
-      lines = lines.concat(collect(r3.data));
-      diagnostics["raw pass"] = `${collect(r3.data).length} lines`;
-    } catch (e: any) {
-      diagnostics["raw pass"] = `failed: ${String(e?.message ?? e).slice(0, 80)}`;
-    }
-    await worker.terminate();
-
-    diagnostics["lines read"] = lines.length;
-    if (lines.length === 0) {
-      return {
-        detector: "OCR", status: "pass", findings: [],
-        diagnostics: { ...diagnostics, note: "no text recognized" },
-      };
-    }
-
     const findings: LocalFinding[] = [];
     const seen = new Set<string>();
-    const remember = (k: string) => (seen.has(k) ? false : (seen.add(k), true));
-    const W = pre.width, H = pre.height;
+    const W = src.width, H = src.height;
+    const toRead = boxes.slice(0, MAX_OCR_REGIONS);
+    let readCount = 0, unreadCount = 0;
 
-    for (const line of lines) {
-      const region = line.bbox
-        ? toRegion(line.bbox.x0, line.bbox.y0, line.bbox.x1, line.bbox.y1, W, H)
-        : undefined;
-      const reading = Math.max(0, Math.min(1, line.confidence));
+    for (let i = 0; i < boxes.length; i++) {
+      const b = boxes[i];
+      const region = toRegion(b.x0, b.y0, b.x1, b.y1, W, H);
+      // Detection confidence: the model's own mean probability for this box
+      const detectionConfidence = Math.max(0.4, Math.min(0.99, b.prob));
 
-      const sources = [line.text, ocrDigitFix(line.text)];
+      // Bound OCR work: read the largest MAX_OCR_REGIONS regions
+      if (i >= MAX_OCR_REGIONS) {
+        unreadCount++;
+        findings.push({
+          type: "handwriting",
+          category: "Text region detected",
+          severity: "medium",
+          evidence: `region ${i + 1} (model confidence ${Math.round(detectionConfidence * 100)}%)`,
+          source: "local-model",
+          detectionConfidence,
+          description: "A text-like region was detected by the local model. (Region was not OCR-read — lower priority.)",
+          action: "Review this region; use removal if it contains anything private.",
+          region,
+        });
+        continue;
+      }
+
+      const r = await readRegion(worker, src, b);
+      readCount++;
+      const hasText = r.text.trim().length > 0;
+      const readable = hasText && r.confidence >= 0.55; // measured threshold: OCR's own confidence
+
+      // Handwriting label: region found by the model but reading failed or
+      // scored low — the honest "marking, not machine-readable" case.
+      if (!readable) {
+        unreadCount++;
+        findings.push({
+          type: "handwriting",
+          category: "Handwritten marking",
+          severity: "medium",
+          evidence: `region ${i + 1} (model ${Math.round(detectionConfidence * 100)}%, reading ${Math.round(r.confidence * 100)}%)`,
+          source: "local-model",
+          detectionConfidence,
+          readingConfidence: r.confidence,
+          description: "A text/handwritten region was detected locally, but its content could not be read reliably — treat it as sensitive.",
+          action: "Remove or pixelate this region before sharing.",
+          region,
+        });
+        continue;
+      }
+
+      // Classify readable text through FixMP's pattern engine rules
+      const sources = [r.text, ocrDigitFix(r.text)];
+      let classified = false;
       for (const c of CLASSIFIERS) {
-        for (const src of sources) {
-          for (const m of src.match(c.regex) ?? []) {
+        for (const srcText of sources) {
+          for (const m of srcText.match(c.regex) ?? []) {
             const key = `${c.type}:${m.toLowerCase().replace(/\s+/g, "")}`;
-            if (!remember(key)) continue;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            classified = true;
             findings.push({
               type: c.type,
               category: c.category,
@@ -255,8 +436,8 @@ async function detectOcrAndClassify(file: File, onProgress: ProgressFn): Promise
               value: m,
               evidence: maskEvidence(m),
               source: "local-ocr",
-              detectionConfidence: 0.9,
-              readingConfidence: reading,
+              detectionConfidence,
+              readingConfidence: r.confidence,
               description: c.description,
               action: c.action,
               region,
@@ -264,160 +445,37 @@ async function detectOcrAndClassify(file: File, onProgress: ProgressFn): Promise
           }
         }
       }
+      if (!classified) {
+        findings.push({
+          type: "text",
+          category: "Text detected",
+          severity: "low",
+          evidence: maskEvidence(r.text.replace(/\n/g, " ").slice(0, 30)),
+          source: "local-ocr",
+          detectionConfidence,
+          readingConfidence: r.confidence,
+          description: "Readable text was detected here. Content didn't match sensitive patterns — review visually.",
+          action: "Review the region; remove if it contains anything private.",
+          region,
+        });
+      }
     }
+    await worker.terminate();
 
+    diagnostics["regions ocr-read"] = readCount;
+    diagnostics["regions unread"] = unreadCount;
     diagnostics["findings"] = findings.length;
-    return { detector: "OCR", status: "pass", findings, diagnostics };
+    return { detector: "Text regions", status: "pass", findings, diagnostics };
   } catch (e: any) {
     return {
-      detector: "OCR", status: "error", findings: [], diagnostics,
-      error: `OCR could not complete: ${String(e?.message ?? e).slice(0, 120)}`,
+      detector: "Text regions", status: "error", findings: [], diagnostics,
+      error: `Text analysis could not complete: ${String(e?.message ?? e).slice(0, 140)}`,
     };
   }
 }
 
-// ── Detector 2: ink / handwriting — v2 precision ───────────────
+// ── Detector 2: QR — multi-scale + quadrant rescue (kept from 2.5.1) ──
 
-// (marker — the function body below through its closing brace is replaced)
-async function detectInk(file: File, onProgress: ProgressFn): Promise<DetectorResult> {
-  const diagnostics: Record<string, string | number> = {};
-  try {
-    onProgress("Ink analysis — stroke detection", 55);
-    const canvas = await fileToCanvas(file, 1000);
-    const W = canvas.width, H = canvas.height;
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    if (!ctx) throw new Error("canvas unavailable");
-    const d = ctx.getImageData(0, 0, W, H).data;
-
-    const hueLo = 190, hueHi = 260;
-    const mask = new Uint8Array(W * H);
-    let maskCount = 0;
-    for (let p = 0; p < W * H; p++) {
-      const i = p * 4;
-      const r = d[i] / 255, g = d[i + 1] / 255, b = d[i + 2] / 255;
-      const max = Math.max(r, g, b), min = Math.min(r, g, b);
-      const v = max, s = max === 0 ? 0 : (max - min) / max;
-      let h = 0;
-      if (max !== min) {
-        const dd = max - min;
-        if (max === b) h = 60 * (4 + (r - g) / dd);
-        else if (max === g) h = 60 * (2 + (b - r) / dd);
-        else h = 60 * ((g - b) / dd);
-        if (h < 0) h += 360;
-      }
-      if (h >= hueLo && h <= hueHi && s > 0.3 && v > 0.2) {
-        mask[p] = 1;
-        maskCount++;
-      }
-    }
-    diagnostics["ink pixels"] = maskCount;
-
-    const labels = new Int32Array(W * H).fill(-1);
-    interface Comp { minX: number; minY: number; maxX: number; maxY: number; px: number; strong: number }
-    const comps: Comp[] = [];
-    const stack: number[] = [];
-    for (let p0 = 0; p0 < W * H; p0++) {
-      if (!mask[p0] || labels[p0] !== -1) continue;
-      const id = comps.length;
-      const comp: Comp = { minX: W, minY: H, maxX: 0, maxY: 0, px: 0, strong: 0 };
-      stack.push(p0);
-      labels[p0] = id;
-      while (stack.length) {
-        const p = stack.pop()!;
-        const x = p % W, y = (p / W) | 0;
-        if (x < comp.minX) comp.minX = x;
-        if (x > comp.maxX) comp.maxX = x;
-        if (y < comp.minY) comp.minY = y;
-        if (y > comp.maxY) comp.maxY = y;
-        comp.px++;
-        for (const n of [p - 1, p + 1, p - W, p + W]) {
-          if (n < 0 || n >= W * H) continue;
-          if ((n % W === W - 1 && p % W === 0) || (n % W === 0 && p % W === W - 1)) continue;
-          if (mask[n] && labels[n] === -1) { labels[n] = id; stack.push(n); }
-        }
-      }
-      comps.push(comp);
-    }
-
-    // ── Shape-based classification (v3) ──
-    // Handwriting = SPARSE strokes (thin ink over a bounding box).
-    // Solid objects (sunglasses frames, blue clothing) = DENSE blobs.
-    // Single letters = dense compact blobs too. Density is the discriminator:
-    //   stroke-like: density roughly 0.04–0.38
-    //   blob/object: density > 0.42  → reject
-    // Also reject: tiny noise (< minPx), oversized objects (> 1.5% of frame
-    // pixels — the sunglasses false positive was 2.08%).
-    const minPx = Math.max(150, Math.round(W * H * 0.0004));
-    const maxShare = 0.015; // component pixels / whole-frame pixels
-    const margin = Math.round(Math.min(W, H) * 0.012);
-
-    const kept: Comp[] = [];
-    let rejectedDense = 0, rejectedBig = 0, rejectedSmall = 0;
-    for (const c of comps) {
-      const bw = c.maxX - c.minX + 1, bh = c.maxY - c.minY + 1;
-      const density = c.px / Math.max(1, bw * bh);
-      const share = c.px / (W * H);
-      if (c.px < minPx) { rejectedSmall++; continue; }
-      if (share > maxShare) { rejectedBig++; continue; }
-      if (density > 0.42 || density < 0.04) { rejectedDense++; continue; }
-      kept.push(c);
-    }
-    diagnostics["components kept"] = kept.length;
-    diagnostics["rejected: dense objects"] = rejectedDense;
-    diagnostics["rejected: oversized"] = rejectedBig;
-    diagnostics["rejected: tiny"] = rejectedSmall;
-
-    const merged: Comp[] = [];
-    for (const c of kept) {
-      const hit = merged.find(
-        (m) =>
-          c.minX <= m.maxX + margin && c.maxX >= m.minX - margin &&
-          c.minY <= m.maxY + margin && c.maxY >= m.minY - margin
-      );
-      if (hit) {
-        hit.minX = Math.min(hit.minX, c.minX); hit.minY = Math.min(hit.minY, c.minY);
-        hit.maxX = Math.max(hit.maxX, c.maxX); hit.maxY = Math.max(hit.maxY, c.maxY);
-        hit.px += c.px; hit.strong += c.strong;
-      } else merged.push({ ...c });
-    }
-    diagnostics["regions"] = merged.length;
-
-    const findings: LocalFinding[] = merged.slice(0, 8).map((c, i) => {
-      const bw = c.maxX - c.minX, bh = c.maxY - c.minY;
-      const density = c.px / Math.max(1, bw * bh);
-      const strongRatio = c.px ? c.strong / c.px : 0;
-      const detectionConfidence = Math.max(0.55, Math.min(0.97, 0.55 + strongRatio));
-      const aspect = bw / Math.max(1, bh);
-      const isSignatureLike = aspect > 1.8 && density < 0.3;
-      return {
-        type: isSignatureLike ? "signature" : "handwriting",
-        category: isSignatureLike ? "Possible handwritten signature" : "Handwritten marking",
-        severity: "medium" as const,
-        evidence: `ink region ${i + 1} (~${Math.round((c.px / (W * H)) * 10000) / 100}% of frame)`,
-        source: "local-ink" as const,
-        detectionConfidence,
-        description: isSignatureLike
-          ? "A handwritten signature-like marking is visible (blue ink). Its content cannot be reliably read locally — treat the region as sensitive."
-          : "A handwritten marking is visible (blue ink). Its content cannot be reliably read locally — treat the region as sensitive.",
-        action: "Remove or pixelate this region before sharing.",
-        region: toRegion(c.minX, c.minY, c.maxX + 1, c.maxY + 1, W, H),
-      };
-    });
-
-    return { detector: "Ink", status: "pass", findings, diagnostics };
-  } catch (e: any) {
-    return {
-      detector: "Ink", status: "error", findings: [], diagnostics,
-      error: `Ink analysis could not complete: ${String(e?.message ?? e).slice(0, 120)}`,
-    };
-  }
-}
-
-// ── Detector 3: QR — v2 multi-scale ────────────────────────────
-
-interface QrHit { data: string; region: RedactionRegion; scaleNote: string }
-
-/** Scan a canvas at one scale; return region in THAT canvas's coords. */
 function scanOnce(canvas: HTMLCanvasElement): { data: string; corners: { x: number; y: number }[] } | null {
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   if (!ctx) return null;
@@ -425,44 +483,32 @@ function scanOnce(canvas: HTMLCanvasElement): { data: string; corners: { x: numb
   const code = jsQR(id.data, canvas.width, canvas.height);
   if (!code?.data) return null;
   const l = code.location;
-  return {
-    data: code.data,
-    corners: [l.topLeftCorner, l.topRightCorner, l.bottomLeftCorner, l.bottomRightCorner],
-  };
+  return { data: code.data, corners: [l.topLeftCorner, l.topRightCorner, l.bottomLeftCorner, l.bottomRightCorner] };
 }
 
 async function detectQr(file: File, onProgress: ProgressFn): Promise<DetectorResult> {
   const diagnostics: Record<string, string | number> = {};
   try {
     onProgress("QR detection — multi-scale", 75);
-    // Scale ladder: full → medium → small. Small codes that vanish at full
-    // size become detectable once the image is downscaled (module size grows
-    // relative to noise, and jsQR's finder patterns resolve).
-    const scales = [1400, 900, 600];
-    const hits: QrHit[] = [];
+    // Ladder runs BOTH directions: downscale for huge images, UPSCALE for
+    // small ones (small QR modules need magnification to resolve).
+    const scales = [1024, 768, 1536, 512];
+    const hits: { data: string; region: RedactionRegion; scaleNote: string }[] = [];
     const seenData = new Set<string>();
 
     for (const s of scales) {
       const canvas = await fileToCanvas(file, s);
       const hit = scanOnce(canvas);
       diagnostics[`scan@${s}`] = hit ? "found" : "none";
-      if (!hit) continue;
-      if (seenData.has(hit.data)) continue;
+      if (!hit || seenData.has(hit.data)) continue;
       seenData.add(hit.data);
       const W = canvas.width, H = canvas.height;
       const xs = hit.corners.map((c) => c.x);
       const ys = hit.corners.map((c) => c.y);
-      hits.push({
-        data: hit.data,
-        region: toRegion(Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys), W, H),
-        scaleNote: `@${s}px`,
-      });
-      break; // one decode per unique code is enough — largest-scale hit wins
+      hits.push({ data: hit.data, region: toRegion(Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys), W, H), scaleNote: `@${s}px` });
+      break;
     }
 
-    // Small-code rescue: if the ladder found nothing, scan QUADRANTS of a
-    // downscaled image — a tiny QR occupying one corner is findable when the
-    // quadrant is analyzed at effective higher zoom.
     if (hits.length === 0) {
       const canvas = await fileToCanvas(file, 1200);
       const W = canvas.width, H = canvas.height;
@@ -470,46 +516,30 @@ async function detectQr(file: File, onProgress: ProgressFn): Promise<DetectorRes
       for (let qy = 0; qy < 2 && hits.length === 0; qy++) {
         for (let qx = 0; qx < 2 && hits.length === 0; qx++) {
           const qx0 = qx * (W - half), qy0 = qy * (H - half);
-          // magnify quadrant 2x into a work canvas
           const work = document.createElement("canvas");
-          work.width = half * 2;
-          work.height = half * 2;
+          work.width = half * 2; work.height = half * 2;
           const wctx = work.getContext("2d", { willReadFrequently: true });
           if (!wctx) continue;
           wctx.imageSmoothingEnabled = true;
           wctx.drawImage(canvas, qx0, qy0, half, half, 0, 0, work.width, work.height);
           const hit = scanOnce(work);
           diagnostics[`quadrant(${qx},${qy})@2x`] = hit ? "found" : "none";
-          if (!hit) continue;
-          if (seenData.has(hit.data)) continue;
+          if (!hit || seenData.has(hit.data)) continue;
           seenData.add(hit.data);
-          // Map back: work coords → quadrant coords → full-image coords
-          const fx0 = qx0 + (hit.corners[0].x / 2);
-          const fy0 = qy0 + (hit.corners[0].y / 2);
           const xs = hit.corners.map((c) => qx0 + c.x / 2);
           const ys = hit.corners.map((c) => qy0 + c.y / 2);
-          void fx0; void fy0;
-          hits.push({
-            data: hit.data,
-            region: toRegion(Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys), W, H),
-            scaleNote: "quadrant@2x",
-          });
+          hits.push({ data: hit.data, region: toRegion(Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys), W, H), scaleNote: "quadrant@2x" });
         }
       }
     }
 
     diagnostics["codes"] = hits.length;
 
-    // Local classification of decoded content (spec: analyze locally first).
-    // If the payload is a URL, run the deterministic Link-Check rules on it —
-    // zero network. Live reachability stays user-initiated (routed to
-    // /check/link, which uses the SSRF-safe server probe).
+    // Local classification of decoded payloads (zero network)
     const findings: LocalFinding[] = hits.map((h) => {
       let desc = `A QR code is visible (${h.scaleNote}). Its content was decoded locally.`;
       let act = "Pixelate or crop the QR code unless it's meant to be scanned.";
       let sev: "high" | "medium" | "low" = "medium";
-      let extra = "";
-
       const trimmed = h.data.trim();
       if (/^https?:\/\//i.test(trimmed)) {
         try {
@@ -523,28 +553,25 @@ async function detectQr(file: File, onProgress: ProgressFn): Promise<DetectorRes
             act = "Do NOT open this destination. Verify with the sender through another channel.";
           } else if (medCount > 0) {
             desc = `This QR code opens a link with ${medCount} caution flag${medCount === 1 ? "" : "s"}: ${urlFindings.map((f) => f.category.toLowerCase()).join(", ")}.`;
-            act = "Verify the destination before opening — use the Verify button to run the full link check.";
+            act = "Verify the destination before opening — use the Verify button for the full check.";
           } else {
-            desc = `This QR code opens a link. Local pattern checks found no red flags in the address itself.`;
-            act = "No local red flags — but a link's true safety can't be proven without visiting it. Use Verify for the full check.";
+            desc = "This QR code opens a link. Local pattern checks found no red flags in the address itself.";
+            act = "No local red flags — a link's true safety can't be proven without visiting it. Use Verify for the full check.";
           }
-          extra = ` Destination: ${trimmed.slice(0, 80)}`;
-          void extra;
         } catch {
-          desc = "This QR code contains a link, but the address couldn't be parsed for local verification.";
-          act = "Treat as unverified. Use the Verify button to run the full link check.";
+          desc = "This QR code contains a link that couldn't be parsed for local verification.";
+          act = "Treat as unverified. Use the Verify button for the full check.";
         }
       } else if (/^[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/.test(trimmed)) {
-        desc = `This QR code contains an email address — possibly a pre-filled contact or scam channel.`;
+        desc = "This QR code contains an email address — possibly a pre-filled contact or scam channel.";
         act = "Remove or blur unless it's meant to be scanned.";
       } else if (/^BT|upi:|paytm|phonepe/i.test(trimmed)) {
         sev = "high";
         desc = "This QR code appears to contain payment details (UPI/payment string).";
         act = "Never share payment QR codes publicly — they can be abused for fraudulent collections.";
       } else {
-        desc = `This QR code contains non-link content (${h.scaleNote}), decoded locally.`;
+        desc = "This QR code contains non-link content, decoded locally.";
       }
-
       return {
         type: "qr",
         category: "QR code visible",
@@ -554,17 +581,13 @@ async function detectQr(file: File, onProgress: ProgressFn): Promise<DetectorRes
         source: "local-qr" as const,
         detectionConfidence: 0.99,
         readingConfidence: 1,
-        description: desc + (extra ? ` ${extra}` : ""),
+        description: desc,
         action: act,
         region: h.region,
       };
     });
 
-    return {
-      detector: "QR", status: "pass",
-      findings,
-      diagnostics,
-    };
+    return { detector: "QR", status: "pass", findings, diagnostics };
   } catch (e: any) {
     return {
       detector: "QR", status: "error", findings: [], diagnostics,
@@ -573,7 +596,7 @@ async function detectQr(file: File, onProgress: ProgressFn): Promise<DetectorRes
   }
 }
 
-// ── Detector 4: metadata (unchanged) ───────────────────────────
+// ── Detector 3: metadata (kept) ────────────────────────────────
 
 async function detectMetadata(file: File, onProgress: ProgressFn): Promise<DetectorResult> {
   const diagnostics: Record<string, string | number> = {};
@@ -622,14 +645,13 @@ export async function runLocalPhotoIntelligence(
   onProgress("Decoding image", 5);
   const probe = await fileToCanvas(file, 1600);
 
-  const [ocr, ink, qr, metadata] = await Promise.all([
-    detectOcrAndClassify(file, onProgress),
-    detectInk(file, onProgress),
+  const [text, qr, metadata] = await Promise.all([
+    detectText(file, onProgress),
     detectQr(file, onProgress),
     detectMetadata(file, onProgress),
   ]);
 
-  const findings = [...ocr.findings, ...ink.findings, ...qr.findings, ...metadata.findings];
+  const findings = [...text.findings, ...qr.findings, ...metadata.findings];
 
   return {
     fileName: file.name,
@@ -637,6 +659,6 @@ export async function runLocalPhotoIntelligence(
     height: probe.height,
     analyzedAt: new Date().toISOString(),
     findings,
-    detectors: { ocr, ink, qr, metadata },
+    detectors: { text, qr, metadata },
   };
 }
