@@ -174,6 +174,34 @@ const MIN_REGION_PROB = 0.45; // NEW: per-box mean-probability floor — drops n
 const MAX_REGIONS = 40;
 const MAX_OCR_REGIONS = 20;  // bound total OCR time
 
+/** Separable box dilation: grows the foreground by `r` px in every direction. */
+function dilate(mask: Uint8Array, w: number, h: number, r: number): Uint8Array {
+  const tmp = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      let v = 0;
+      for (let dx = -r; dx <= r; dx++) {
+        const xx = x + dx;
+        if (xx >= 0 && xx < w && mask[row + xx]) { v = 1; break; }
+      }
+      tmp[row + x] = v;
+    }
+  }
+  const out = new Uint8Array(w * h);
+  for (let x = 0; x < w; x++) {
+    for (let y = 0; y < h; y++) {
+      let v = 0;
+      for (let dy = -r; dy <= r; dy++) {
+        const yy = y + dy;
+        if (yy >= 0 && yy < h && tmp[yy * w + x]) { v = 1; break; }
+      }
+      out[y * w + x] = v;
+    }
+  }
+  return out;
+}
+
 /** Runs the detection model; returns text-region boxes in ORIGINAL canvas coords. */
 async function detectRegions(
   src: HTMLCanvasElement
@@ -218,33 +246,50 @@ async function detectRegions(
   const mask = new Uint8Array(plane);
   for (let p = 0; p < plane; p++) if (prob[p] >= BOX_THRESHOLD) mask[p] = 1;
 
+  // BUGFIX: a single real-world object — a signature's disconnected pen
+  // strokes, a spaced-out handwritten number, a QR code's finder patterns
+  // separated by quiet-zone gaps — was being split into many separate
+  // connected components, because touching-pixel connectivity alone doesn't
+  // bridge small gaps. That's what caused "one item → many small regions",
+  // and it's *also* what caused visible leftovers after retouch: each
+  // fragment got redacted separately, leaving the untouched gaps between
+  // them still showing the original content. Dilating the mask before
+  // labeling bridges those gaps so one physical mark becomes one region.
+  const DILATE_RADIUS = 4; // px, in 960-model space
+  const dilated = dilate(mask, MODEL_SIZE, MODEL_SIZE, DILATE_RADIUS);
+
   const labels = new Int32Array(plane).fill(-1);
   interface Comp { minX: number; minY: number; maxX: number; maxY: number; px: number; probSum: number }
   const comps: Comp[] = [];
   const stack: number[] = [];
   for (let p0 = 0; p0 < plane; p0++) {
-    if (!mask[p0] || labels[p0] !== -1) continue;
+    if (!dilated[p0] || labels[p0] !== -1) continue;
     const cid = comps.length;
     const comp: Comp = { minX: MODEL_SIZE, minY: MODEL_SIZE, maxX: 0, maxY: 0, px: 0, probSum: 0 };
     stack.push(p0);
     labels[p0] = cid;
     while (stack.length) {
       const p = stack.pop()!;
-      const x = p % MODEL_SIZE, y = (p / MODEL_SIZE) | 0;
-      if (x < comp.minX) comp.minX = x;
-      if (x > comp.maxX) comp.maxX = x;
-      if (y < comp.minY) comp.minY = y;
-      if (y > comp.maxY) comp.maxY = y;
-      comp.px++;
-      comp.probSum += prob[p];
+      // Connectivity walks the DILATED mask (to bridge gaps), but the box's
+      // bounds/pixel-count/confidence are measured only from REAL detected
+      // pixels — dilation should merge regions, not inflate their reported size.
+      if (mask[p]) {
+        const x = p % MODEL_SIZE, y = (p / MODEL_SIZE) | 0;
+        if (x < comp.minX) comp.minX = x;
+        if (x > comp.maxX) comp.maxX = x;
+        if (y < comp.minY) comp.minY = y;
+        if (y > comp.maxY) comp.maxY = y;
+        comp.px++;
+        comp.probSum += prob[p];
+      }
       for (const n of [p - 1, p + 1, p - MODEL_SIZE, p + MODEL_SIZE]) {
         if (n < 0 || n >= plane) continue;
         if ((n % MODEL_SIZE === MODEL_SIZE - 1 && p % MODEL_SIZE === 0) ||
             (n % MODEL_SIZE === 0 && p % MODEL_SIZE === MODEL_SIZE - 1)) continue;
-        if (mask[n] && labels[n] === -1) { labels[n] = cid; stack.push(n); }
+        if (dilated[n] && labels[n] === -1) { labels[n] = cid; stack.push(n); }
       }
     }
-    comps.push(comp);
+    if (comp.px > 0) comps.push(comp); // discard components made entirely of dilation padding
   }
 
   // Unclip: expand each box ~20% of its smaller dim (DBNet standard practice),
@@ -655,6 +700,15 @@ async function detectMetadata(file: File, onProgress: ProgressFn): Promise<Detec
   }
 }
 
+/** Fraction of region `a` that overlaps region `b` (both in 0–1000 space). */
+function overlapFraction(a: RedactionRegion, b: RedactionRegion): number {
+  const xOverlap = Math.max(0, Math.min(a.xMax, b.xMax) - Math.max(a.xMin, b.xMin));
+  const yOverlap = Math.max(0, Math.min(a.yMax, b.yMax) - Math.max(a.yMin, b.yMin));
+  const interArea = xOverlap * yOverlap;
+  const aArea = Math.max(1, (a.xMax - a.xMin) * (a.yMax - a.yMin));
+  return interArea / aArea;
+}
+
 // ── Orchestrator ───────────────────────────────────────────────
 
 export async function runLocalPhotoIntelligence(
@@ -669,7 +723,18 @@ export async function runLocalPhotoIntelligence(
     detectMetadata(file, onProgress),
   ]);
 
-  const findings = [...text.findings, ...qr.findings, ...metadata.findings];
+  // BUGFIX: a QR code's high-contrast module grid can itself trigger the
+  // text/handwriting detector, producing extra "text region" findings that
+  // are really just the same QR code the QR detector already reported —
+  // this is the other half of "one QR code, multiple regions." Drop any
+  // text finding whose box mostly sits inside a QR finding's box.
+  const dedupedTextFindings = text.findings.filter((tf) => {
+    if (!tf.region) return true;
+    return !qr.findings.some((qf) => qf.region && overlapFraction(tf.region!, qf.region) > 0.6);
+  });
+  const text2: DetectorResult = { ...text, findings: dedupedTextFindings };
+
+  const findings = [...dedupedTextFindings, ...qr.findings, ...metadata.findings];
 
   return {
     fileName: file.name,
@@ -677,6 +742,6 @@ export async function runLocalPhotoIntelligence(
     height: probe.height,
     analyzedAt: new Date().toISOString(),
     findings,
-    detectors: { text, qr, metadata },
+    detectors: { text: text2, qr, metadata },
   };
 }
