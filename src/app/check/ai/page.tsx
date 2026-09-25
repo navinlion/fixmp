@@ -10,6 +10,7 @@ import { SectionLabel } from "@/components/brand";
 import { toVerdict } from "@/lib/adapter";
 import type { CheckResponse, Verdict } from "@/types/check";
 import { AI_ENABLED } from "@/config/flags";
+import { getBudget, consume } from "@/lib/scan-budget";
 import { ArrowLeft, ArrowRight, Bot, EyeOff, Loader2, ScanSearch, ShieldCheck, Zap } from "lucide-react";
 
 const MAX = 5000;
@@ -49,6 +50,11 @@ function AICheckInner() {
     const value = text.trim();
     if (!value || loading) return;
 
+    if (deepScan && getBudget().remaining <= 0) {
+      setError("Daily deep-scan limit reached (5). Local pattern checks are unlimited — deep scans reset tomorrow.");
+      return;
+    }
+
     setLoading(true);
     setError("");
     setVerdict(null);
@@ -68,6 +74,8 @@ function AICheckInner() {
         throw new Error("Something went wrong while checking this. Please try again.");
       }
 
+      if ((data as CheckResponse).deepScanStatus === "full") consume();
+      if ((data as CheckResponse).deepScanStatus === "full") consume();
       setVerdict(toVerdict(data as CheckResponse, value, "Ask AI check"));
       setTimeout(() => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 60);
     } catch (err) {
@@ -187,8 +195,13 @@ function AICheckInner() {
               onChange={(e) => setDeepScan(e.target.checked)}
               className="mt-0.5 h-4 w-4 accent-amber-600"
             />
-            <span className="text-sm">
-  <span className="font-bold text-stone-900">Advanced AI analysis</span>
+                <span className="text-sm">
+                  <span className="font-bold text-stone-900">
+                    Deep AI analysis
+                    <span className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 font-mono text-[9px] font-bold uppercase tracking-widest text-amber-700">
+                      {getBudget().remaining} of {getBudget().limit} free today
+                    </span>
+                  </span>
   <span className="block text-stone-500">
     Optional. Off (default): everything is checked using local analysis rules
     on our server — no AI analysis is used. On: your text is analyzed more

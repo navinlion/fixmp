@@ -31,8 +31,12 @@ export default function VerdictCard({ verdict, onReset }: VerdictCardProps) {
   const [copyFailed, setCopyFailed] = useState(false);
   const [feedback, setFeedback] = useState<null | "up" | "down" | "wrong">(null);
 
-  // Honest labeling: a clear result from a PARTIAL check is shown amber, not green.
-  const partial = verdict.deepScanStatus === "busy" || verdict.deepScanStatus === "off";
+  // Honest labeling: a "clear" result from any PARTIAL scope is forced amber.
+  // Local metadata-only checks are ALWAYS partial by definition.
+  const partial =
+    verdict.deepScanStatus === "busy" ||
+    verdict.deepScanStatus === "off" ||
+    verdict.deepScanStatus === "skipped";
   const partialOnly = partial && verdict.riskLevel === "clear";
   const bannerLevel = partialOnly ? "review" : verdict.riskLevel;
   const statusText = partialOnly ? "PARTIAL CHECK — DEEP SCAN UNAVAILABLE" : verdict.statusText;

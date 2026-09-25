@@ -6,16 +6,19 @@ import Header from "@/components/Header";
 import Footer from "@/components/Footer";
 import VerdictCard from "@/components/VerdictCard";
 import ImageRedactor from "@/components/ImageRedactor";
+import LocalPhotoReport from "@/components/LocalPhotoReport";
 import { SectionLabel } from "@/components/brand";
 import { toVerdict } from "@/lib/adapter";
 import { LIMITS } from "@/config/flags";
+import { getBudget, consume } from "@/lib/scan-budget";
+import { runLocalPhotoIntelligence, type LocalPhotoReport as LocalReport } from "@/lib/photo-local-engine";
 import type { Verdict } from "@/types/check";
 import {
   ArrowLeft, ArrowRight, CheckCircle2, Eye, ImageIcon, Loader2,
   Scan, ScanSearch, X,
 } from "lucide-react";
 
-const MAX_EDGE = 1600; // analysis copy is downscaled; redaction uses the original
+const MAX_EDGE = 1600;
 
 const SELF_CHECK = [
   "Documents, letters, ID cards or packages in the background",
@@ -34,7 +37,6 @@ async function makeAnalysisCopy(file: File): Promise<string> {
   img.src = url;
   await img.decode();
   URL.revokeObjectURL(url);
-
   const scale = Math.min(1, MAX_EDGE / Math.max(img.naturalWidth, img.naturalHeight));
   const canvas = document.createElement("canvas");
   canvas.width = Math.round(img.naturalWidth * scale);
@@ -49,9 +51,11 @@ export default function PhotoCheckPage() {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState<string | null>(null);
   const [verdict, setVerdict] = useState<Verdict | null>(null);
+  const [localReport, setLocalReport] = useState<LocalReport | null>(null);
   const [deepScan, setDeepScan] = useState(false);
   const [selfCheck, setSelfCheck] = useState<null | "voluntary" | "aiOff">(null);
   const [loading, setLoading] = useState(false);
+  const [localRunning, setLocalRunning] = useState(false);
   const [error, setError] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const originalFileRef = useRef<File | null>(null);
@@ -61,6 +65,7 @@ export default function PhotoCheckPage() {
     setPreviewUrl(null);
     setAnalysis(null);
     setVerdict(null);
+    setLocalReport(null);
     setDeepScan(false);
     setSelfCheck(null);
     setError("");
@@ -80,8 +85,9 @@ export default function PhotoCheckPage() {
     }
     setError("");
     setVerdict(null);
+    setLocalReport(null);
     setSelfCheck(null);
-    originalFileRef.current = file; // stays in the browser — used only for the safe copy
+    originalFileRef.current = file;
     setPreviewUrl(URL.createObjectURL(file));
     try {
       setAnalysis(await makeAnalysisCopy(file));
@@ -91,19 +97,37 @@ export default function PhotoCheckPage() {
   }
 
   async function handleCheck() {
-    if (loading) return;
+    if (loading || localRunning) return;
 
-    // Default path — local self-check: ZERO network requests, ZERO upload.
+    // Default path — LOCAL INTELLIGENCE ENGINE: multi-detector, zero upload.
     if (!deepScan) {
       setVerdict(null);
-      setSelfCheck("voluntary");
+      setSelfCheck(null);
+      setLocalReport(null);
+      setLocalRunning(true);
+      setError("");
+      try {
+        if (!originalFileRef.current) return;
+        const report = await runLocalPhotoIntelligence(originalFileRef.current);
+        setLocalReport(report);
+      } catch {
+        setSelfCheck("voluntary"); // honest fallback if the engine itself fails
+      } finally {
+        setLocalRunning(false);
+      }
       return;
     }
 
+    // Deep path — budget guard, then server analysis
+    if (getBudget().remaining <= 0) {
+      setError("Daily deep-scan limit reached (5). Local checks are unlimited — deep scans reset tomorrow.");
+      return;
+    }
     if (!analysis) return;
     setLoading(true);
     setError("");
     setVerdict(null);
+    setLocalReport(null);
     setSelfCheck(null);
 
     try {
@@ -120,6 +144,7 @@ export default function PhotoCheckPage() {
       } else if (data.status === "SKIPPED") {
         setSelfCheck("voluntary");
       } else {
+        if (data.deepScanStatus === "full") consume();
         setVerdict(toVerdict(data, originalFileRef.current?.name ?? "photo", "Photo check"));
       }
     } catch (err) {
@@ -131,6 +156,26 @@ export default function PhotoCheckPage() {
 
   const removable = (verdict?.findings ?? []).filter((f) => f.region);
   const notRemovable = (verdict?.findings ?? []).filter((f) => !f.region);
+
+  const localRemovable = (localReport?.findings ?? [])
+    .filter((f) => f.region)
+    .map((f, i) => ({
+      id: `local-${f.type}-${i}`,
+      category: f.category,
+      description: f.description,
+      severity: f.severity,
+      region: f.region,
+    }));
+  const localNotRemovable = (localReport?.findings ?? [])
+    .filter((f) => !f.region)
+    .map((f, i) => ({
+      id: `local-${f.type}-nr-${i}`,
+      category: f.category,
+      severity: f.severity,
+      description: f.description,
+      evidence: f.evidence,
+      action: f.action,
+    }));
 
   return (
     <div className="flex min-h-screen flex-col">
@@ -147,8 +192,8 @@ export default function PhotoCheckPage() {
               DID YOU MISS <span className="text-amber-600">ANYTHING?</span>
             </h1>
             <p className="mt-4 leading-relaxed text-stone-600">
-              Upload the photo you&apos;re about to share. FixMP looks at the whole frame —
-              backgrounds, screens, documents, reflections — for things you may not have noticed.
+              Upload the photo you&apos;re about to share. FixMP analyzes it on your device —
+              text, handwriting, codes, metadata — and deep-scans the frame only on request.
             </p>
           </div>
 
@@ -190,10 +235,10 @@ export default function PhotoCheckPage() {
                   <img
                     src={previewUrl}
                     alt="Photo to be checked"
-                    className={`max-h-[420px] w-full object-contain transition-all duration-500 ${loading ? "opacity-40 grayscale" : "opacity-100"}`}
+                    className={`max-h-[420px] w-full object-contain transition-all duration-500 ${loading || localRunning ? "opacity-40 grayscale" : "opacity-100"}`}
                   />
 
-                  {loading && (
+                  {(loading || localRunning) && (
                     <div className="absolute inset-0 flex items-center justify-center">
                       <div className="absolute inset-0 bg-slate-950/60 backdrop-blur-sm" />
                       <div className="scanner-ring" />
@@ -203,13 +248,17 @@ export default function PhotoCheckPage() {
                       <div className="scanner-bracket bracket-br" />
                       <div className="scan-beam" />
                       <div className="relative z-20 flex flex-col items-center">
-                        <div className="tech-text animate-pulse text-lg font-bold text-blue-400">Scanning</div>
-                        <div className="tech-text mt-1 text-xs text-stone-400">Analyzing the full frame…</div>
+                        <div className="tech-text animate-pulse text-lg font-bold text-blue-400">
+                          {localRunning ? "Local scan" : "Deep scan"}
+                        </div>
+                        <div className="tech-text mt-1 text-xs text-stone-400">
+                          {localRunning ? "Reading text, strokes, codes & metadata on your device…" : "Analyzing the full frame…"}
+                        </div>
                       </div>
                     </div>
                   )}
 
-                  {!loading && (
+                  {!loading && !localRunning && (
                     <button
                       onClick={clearAll}
                       aria-label="Remove photo"
@@ -220,7 +269,6 @@ export default function PhotoCheckPage() {
                   )}
                 </div>
 
-                {/* Deep scan opt-in — default OFF: nothing is uploaded unless requested */}
                 <label className="mt-6 flex w-full max-w-lg cursor-pointer items-start gap-3 rounded-xl border border-stone-700 bg-stone-900/60 p-4 transition-colors hover:border-amber-400/60">
                   <input
                     type="checkbox"
@@ -229,16 +277,21 @@ export default function PhotoCheckPage() {
                     className="mt-0.5 h-4 w-4 accent-amber-500"
                   />
                   <span className="text-sm">
-                    <span className="font-bold text-white">Deep AI scan</span>
+                    <span className="font-bold text-white">
+                      Deep AI scan
+                      <span className="ml-2 rounded-full bg-amber-500/20 px-2 py-0.5 font-mono text-[9px] font-bold uppercase tracking-widest text-amber-400">
+                        {getBudget().remaining} of {getBudget().limit} free today
+                      </span>
+                    </span>
                     <span className="block text-stone-400">
-                      Optional. Off (default): the self-check runs in your browser — nothing is
-                      uploaded anywhere. On: a resized copy of your photo is analyzed in depth by
-                      an external AI service.
+                      Optional. Off (default): full local analysis in your browser — nothing
+                      uploaded. On: a resized copy is also analyzed in depth by an external AI
+                      service.
                     </span>
                   </span>
                 </label>
 
-                {!loading ? (
+                {!loading && !localRunning ? (
                   <button
                     onClick={handleCheck}
                     disabled={!analysis}
@@ -250,7 +303,7 @@ export default function PhotoCheckPage() {
                       <ScanSearch size={20} aria-hidden="true" />
                     )}
                     <span className="tech-text text-base tracking-widest">
-                      {deepScan ? "Deep AI scan" : "Local self-check"}
+                      {deepScan ? "Deep AI scan" : "Analyze locally"}
                     </span>
                   </button>
                 ) : (
@@ -279,47 +332,41 @@ export default function PhotoCheckPage() {
             </div>
           )}
 
-          {/* Local self-check — shown for the voluntary default path OR admin-disabled AI */}
-          {selfCheck && (
-            <div className="mt-8 rounded-2xl border border-amber-200 bg-amber-50/60 p-5 sm:p-6">
-              <h2 className="text-lg font-extrabold tracking-tight text-stone-900">
-                {selfCheck === "voluntary"
-                  ? "Local self-check — nothing was uploaded"
-                  : "Deep scan is switched off right now"}
-              </h2>
-              <p className="mt-1.5 text-sm leading-relaxed text-stone-600">
-                {selfCheck === "voluntary"
-                  ? "Here is the exact checklist the deep scan uses. Give your photo 30 honest seconds against it — or turn on Deep AI scan above and run the full analysis:"
-                  : "Instead of pretending, here's the exact checklist FixMP's deep scan uses. Give your photo 30 honest seconds against it:"}
-              </p>
-              <ul className="mt-4 space-y-2.5">
-                {SELF_CHECK.map((item) => (
-                  <li key={item} className="flex items-start gap-2.5 text-sm text-stone-700">
-                    <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-amber-600" aria-hidden="true" />
-                    {item}
-                  </li>
-                ))}
-              </ul>
+          {/* LOCAL REPORT — the primary result */}
+          {localReport && (
+            <div className="mt-8">
+              <LocalPhotoReport report={localReport} previewUrl={previewUrl ?? ""} />
+              {(localRemovable.length > 0 || localNotRemovable.length > 0) && (
+                <ImageRedactor
+                  originalFile={originalFileRef.current}
+                  removable={localRemovable}
+                  notRemovable={localNotRemovable}
+                />
+              )}
             </div>
           )}
 
+          {/* DEEP CONFIRM — optional, clearly separate */}
           {verdict && (
-            <>
-              <div className="mt-8">
-                <VerdictCard verdict={verdict} onReset={clearAll} />
-              </div>
-              <ImageRedactor
-                originalFile={originalFileRef.current}
-                removable={removable.map((f) => ({
-                  id: f.id,
-                  category: f.category,
-                  description: f.description,
-                  severity: f.severity,
-                  region: f.region,
-                }))}
-                notRemovable={notRemovable}
-              />
-            </>
+            <div className="mt-10">
+              <p className="mb-3 font-mono text-[11px] font-bold uppercase tracking-[0.2em] text-stone-400">
+                Deep confirm — optional external AI analysis
+              </p>
+              <VerdictCard verdict={verdict} onReset={clearAll} />
+              {removable.length > 0 && (
+                <ImageRedactor
+                  originalFile={originalFileRef.current}
+                  removable={removable.map((f) => ({
+                    id: f.id,
+                    category: f.category,
+                    description: f.description,
+                    severity: f.severity,
+                    region: f.region,
+                  }))}
+                  notRemovable={notRemovable}
+                />
+              )}
+            </div>
           )}
 
           <Link
