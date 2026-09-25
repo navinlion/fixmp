@@ -82,13 +82,22 @@ function toRegion(
   };
 }
 
-async function fileToCanvas(file: File, maxEdge: number): Promise<HTMLCanvasElement> {
+async function fileToCanvas(
+  file: File,
+  targetLongEdge: number,
+  opts: { allowUpscale?: boolean } = {}
+): Promise<HTMLCanvasElement> {
   const url = URL.createObjectURL(file);
   const img = new Image();
   img.src = url;
   await img.decode();
   URL.revokeObjectURL(url);
-  const scale = Math.min(1, maxEdge / Math.max(img.naturalWidth, img.naturalHeight));
+  const longEdge = Math.max(img.naturalWidth, img.naturalHeight);
+  // BUGFIX: Math.min(1, ...) previously capped this at "shrink only", which
+  // silently defeated the QR ladder's upscale passes (small QR modules need
+  // magnification to resolve) and broke the "model always sees exactly
+  // 960px" guarantee for text detection on images smaller than 960px.
+  const scale = opts.allowUpscale ? targetLongEdge / longEdge : Math.min(1, targetLongEdge / longEdge);
   const canvas = document.createElement("canvas");
   canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
   canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
@@ -160,7 +169,8 @@ function ocrDigitFix(s: string): string {
 }
 
 const MODEL_SIZE = 960;
-const BOX_THRESHOLD = 0.3;   // DBNet standard
+const BOX_THRESHOLD = 0.3;   // DBNet standard (per-pixel)
+const MIN_REGION_PROB = 0.45; // NEW: per-box mean-probability floor — drops noise blobs
 const MAX_REGIONS = 40;
 const MAX_OCR_REGIONS = 20;  // bound total OCR time
 
@@ -241,6 +251,11 @@ async function detectRegions(
   // drop specks, map back to source coords
   const boxes = comps
     .filter((c) => c.px >= 12)
+    // BUGFIX: without a mean-probability floor, low-confidence noise blobs
+    // (JPEG artifacts, fabric texture, skin creases) were passing through as
+    // "regions" purely because they cleared 12px at the *pixel* threshold —
+    // the box never carried its own confidence check.
+    .filter((c) => c.probSum / Math.max(1, c.px) >= MIN_REGION_PROB)
     .map((c) => {
       const bw = c.maxX - c.minX + 1, bh = c.maxY - c.minY + 1;
       const ux = Math.max(2, Math.round(bw * 0.1));
@@ -349,7 +364,7 @@ async function detectText(file: File, onProgress: ProgressFn): Promise<DetectorR
     // Deterministic resolution: the model ALWAYS sees exactly 960px regardless
     // of device/browser scaling — identical input = identical findings on
     // mobile and desktop.
-    const src = await fileToCanvas(file, 960);
+    const src = await fileToCanvas(file, 960, { allowUpscale: true });
     const { boxes, loadMs, inferMs } = await detectRegions(src);
     diagnostics["model load"] = `${loadMs}ms`;
     diagnostics["inference"] = `${inferMs}ms`;
@@ -375,8 +390,11 @@ async function detectText(file: File, onProgress: ProgressFn): Promise<DetectorR
     for (let i = 0; i < boxes.length; i++) {
       const b = boxes[i];
       const region = toRegion(b.x0, b.y0, b.x1, b.y1, W, H);
-      // Detection confidence: the model's own mean probability for this box
-      const detectionConfidence = Math.max(0.4, Math.min(0.99, b.prob));
+      // Detection confidence: the model's own mean probability for this box.
+      // BUGFIX: no artificial floor — MIN_REGION_PROB already filtered out
+      // anything below a sane confidence, so what's left should be reported
+      // as-is instead of being inflated to look more certain than it is.
+      const detectionConfidence = Math.min(0.99, b.prob);
 
       // Bound OCR work: read the largest MAX_OCR_REGIONS regions
       if (i >= MAX_OCR_REGIONS) {
@@ -497,7 +515,7 @@ async function detectQr(file: File, onProgress: ProgressFn): Promise<DetectorRes
     const seenData = new Set<string>();
 
     for (const s of scales) {
-      const canvas = await fileToCanvas(file, s);
+      const canvas = await fileToCanvas(file, s, { allowUpscale: true });
       const hit = scanOnce(canvas);
       diagnostics[`scan@${s}`] = hit ? "found" : "none";
       if (!hit || seenData.has(hit.data)) continue;
@@ -510,7 +528,7 @@ async function detectQr(file: File, onProgress: ProgressFn): Promise<DetectorRes
     }
 
     if (hits.length === 0) {
-      const canvas = await fileToCanvas(file, 1200);
+      const canvas = await fileToCanvas(file, 1200, { allowUpscale: true });
       const W = canvas.width, H = canvas.height;
       const half = Math.floor(Math.min(W, H) / 2);
       for (let qy = 0; qy < 2 && hits.length === 0; qy++) {

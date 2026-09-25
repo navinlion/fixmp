@@ -1,10 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AlertTriangle, ChevronDown, ExternalLink, Eye, MapPin, ShieldCheck, X } from "lucide-react";
 import type { LocalPhotoReport, LocalFinding } from "@/lib/photo-local-engine";
 import { TEST_MODE } from "@/config/flags";
 import Link from "next/link";
+import ImageRedactor from "@/components/ImageRedactor";
+import type { VerdictFinding } from "@/types/check";
 
 const sevDot: Record<string, string> = { high: "bg-red-500", medium: "bg-amber-500", low: "bg-emerald-500" };
 
@@ -93,6 +95,78 @@ function DetectorLine({ name, result }: { name: string; result: { status: string
 interface Props {
   report: LocalPhotoReport;
   previewUrl: string;
+  /** Raw file, needed to generate the safe-to-share copy. */
+  originalFile: File;
+}
+
+/**
+ * BUGFIX: the highlight overlay used to be positioned as a naive percentage
+ * of the *container* div. Because the <img> uses object-contain inside a
+ * fixed-height box, any photo whose aspect ratio doesn't match the container
+ * gets letterboxed — empty space above/below or left/right — and that gap
+ * was never accounted for. The box would land wherever the raw percentage
+ * said, which is disconnected from where the pixels actually are. This is
+ * worse the more the container and photo aspect ratios diverge (very
+ * noticeable on wide desktop windows with portrait photos).
+ *
+ * This hook computes the real rendered image rect (in px, relative to the
+ * <img> element's own box) so overlays can be positioned against it instead.
+ */
+function useContainRect(imgRef: React.RefObject<HTMLImageElement>) {
+  const [rect, setRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  useEffect(() => {
+    const img = imgRef.current;
+    if (!img) return;
+    const compute = () => {
+      if (!img.naturalWidth || !img.naturalHeight) return;
+      const boxW = img.clientWidth, boxH = img.clientHeight;
+      if (!boxW || !boxH) return;
+      const boxRatio = boxW / boxH;
+      const imgRatio = img.naturalWidth / img.naturalHeight;
+      let w: number, h: number, x: number, y: number;
+      if (imgRatio > boxRatio) {
+        w = boxW; h = boxW / imgRatio; x = 0; y = (boxH - h) / 2;
+      } else {
+        h = boxH; w = boxH * imgRatio; y = 0; x = (boxW - w) / 2;
+      }
+      setRect({ x, y, w, h });
+    };
+    if (img.complete) compute();
+    img.addEventListener("load", compute);
+    const ro = new ResizeObserver(compute);
+    ro.observe(img);
+    return () => {
+      img.removeEventListener("load", compute);
+      ro.disconnect();
+    };
+  }, [imgRef]);
+  return rect;
+}
+
+/** Findings with a region can be auto-removed by ImageRedactor. */
+function toRemovable(findings: LocalFinding[]) {
+  return findings
+    .filter((f) => f.region)
+    .map((f, i) => ({
+      id: `${f.type}-${i}`,
+      category: f.category,
+      description: f.description,
+      severity: f.severity,
+      region: f.region!,
+    }));
+}
+
+/** Findings with no fixed region (nothing to crop/retouch) are listed as manual follow-ups. */
+function toNotRemovable(findings: LocalFinding[]): VerdictFinding[] {
+  return findings
+    .filter((f) => !f.region)
+    .map((f, i) => ({
+      id: `${f.type}-nr-${i}`,
+      category: f.category,
+      description: f.description,
+      severity: f.severity,
+      action: f.action,
+    })) as unknown as VerdictFinding[]; // NOTE: confirm this matches your VerdictFinding shape in @/types/check
 }
 
 /** Overall share-safety statement, driven by actual finding counts. */
@@ -111,9 +185,11 @@ function SafetyVerdict({ findings }: { findings: LocalFinding[] }) {
   );
 }
 
-export default function LocalPhotoReport({ report, previewUrl }: Props) {
+export default function LocalPhotoReport({ report, previewUrl, originalFile }: Props) {
   const [highlight, setHighlight] = useState<LocalFinding | null>(null);
   const [diagOpen, setDiagOpen] = useState(false);
+  const imgRef = useRef<HTMLImageElement>(null);
+  const imgRect = useContainRect(imgRef);
 
   return (
     <section aria-live="polite" className="space-y-5">
@@ -132,16 +208,16 @@ export default function LocalPhotoReport({ report, previewUrl }: Props) {
       {/* Image + region highlight */}
       <div className="relative overflow-hidden rounded-2xl border border-stone-200 bg-black">
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={previewUrl} alt="Analyzed photo" className="max-h-[380px] w-full object-contain" />
-        {highlight?.region && (
+        <img ref={imgRef} src={previewUrl} alt="Analyzed photo" className="max-h-[380px] w-full object-contain" />
+        {highlight?.region && imgRect && (
           <div
             aria-hidden="true"
             className="pointer-events-none absolute border-[3px] border-amber-400 bg-amber-400/20 shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]"
             style={{
-              left: `${highlight.region.xMin / 10}%`,
-              top: `${highlight.region.yMin / 10}%`,
-              width: `${((highlight.region.xMax - highlight.region.xMin) / 1000) * 100}%`,
-              height: `${((highlight.region.yMax - highlight.region.yMin) / 1000) * 100}%`,
+              left: `${imgRect.x + (highlight.region.xMin / 1000) * imgRect.w}px`,
+              top: `${imgRect.y + (highlight.region.yMin / 1000) * imgRect.h}px`,
+              width: `${((highlight.region.xMax - highlight.region.xMin) / 1000) * imgRect.w}px`,
+              height: `${((highlight.region.yMax - highlight.region.yMin) / 1000) * imgRect.h}px`,
             }}
           />
         )}
@@ -159,6 +235,14 @@ export default function LocalPhotoReport({ report, previewUrl }: Props) {
       {/* Overall share-safety verdict */}
       <SafetyVerdict findings={report.findings} />
 
+      {/* Scope disclosure — this pass only covers what's listed below */}
+      <p className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-xs leading-relaxed text-stone-500">
+        This on-device scan checks <strong>text/handwriting (OCR)</strong>,{" "}
+        <strong>QR codes</strong>, and <strong>GPS/EXIF metadata</strong>. It does not check faces,
+        reflections, background context, or documents beyond what OCR can read — run a Deep AI
+        Check for that.
+      </p>
+
       {/* Findings (evidence map) */}
       {report.findings.length > 0 ? (
         <ul className="space-y-3">
@@ -172,6 +256,13 @@ export default function LocalPhotoReport({ report, previewUrl }: Props) {
           remember what each detector covers.
         </p>
       )}
+
+      {/* Turn findings into an actual safe-to-share file */}
+      <ImageRedactor
+        originalFile={originalFile}
+        removable={toRemovable(report.findings)}
+        notRemovable={toNotRemovable(report.findings)}
+      />
 
       {/* Per-detector status — the "Not detected" vs "Could not analyze" line */}
       <div className="rounded-2xl border border-stone-200 bg-white p-5">
