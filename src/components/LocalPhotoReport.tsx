@@ -96,7 +96,7 @@ interface Props {
   report: LocalPhotoReport;
   previewUrl: string;
   /** Raw file, needed to generate the safe-to-share copy. */
-  originalFile: File;
+  originalFile: File | null;
 }
 
 /**

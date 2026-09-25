@@ -335,7 +335,7 @@ export default function PhotoCheckPage() {
           {/* LOCAL REPORT — the primary result */}
           {localReport && (
             <div className="mt-8">
-              <LocalPhotoReport report={localReport} previewUrl={previewUrl ?? ""} />
+               <LocalPhotoReport report={localReport} previewUrl={previewUrl ?? ""} originalFile={originalFileRef.current} />
               {(localRemovable.length > 0 || localNotRemovable.length > 0) && (
                 <ImageRedactor
                   originalFile={originalFileRef.current}
@@ -352,19 +352,12 @@ export default function PhotoCheckPage() {
               <p className="mb-3 font-mono text-[11px] font-bold uppercase tracking-[0.2em] text-stone-400">
                 Deep confirm — optional external AI analysis
               </p>
-              <VerdictCard verdict={verdict} onReset={clearAll} />
+                            <VerdictCard verdict={verdict} onReset={clearAll} />
               {removable.length > 0 && (
-                <ImageRedactor
-                  originalFile={originalFileRef.current}
-                  removable={removable.map((f) => ({
-                    id: f.id,
-                    category: f.category,
-                    description: f.description,
-                    severity: f.severity,
-                    region: f.region,
-                  }))}
-                  notRemovable={notRemovable}
-                />
+                <p className="mt-3 rounded-xl border border-stone-200 bg-white p-4 text-sm text-stone-600">
+                  The deep-confirm findings above can also be removed — use the safe-to-share
+                  generator in the local report below, which handles all detected regions.
+                </p>
               )}
             </div>
           )}
