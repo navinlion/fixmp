@@ -40,3 +40,6 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 eng.traineddata
+changes.txt
+project-tree.txt
+*.zip

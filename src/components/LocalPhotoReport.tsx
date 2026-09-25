@@ -112,7 +112,7 @@ interface Props {
  * This hook computes the real rendered image rect (in px, relative to the
  * <img> element's own box) so overlays can be positioned against it instead.
  */
-function useContainRect(imgRef: React.RefObject<HTMLImageElement>) {
+function useContainRect(imgRef: React.RefObject<HTMLImageElement | null>) {
   const [rect, setRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   useEffect(() => {
     const img = imgRef.current;
