@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { ArrowRight, type LucideIcon } from "lucide-react";
 
-export type ToolTone = "purple" | "blue" | "emerald" | "amber" | "rose" | "slate";
+export type ToolTone = "purple" | "blue" | "emerald" | "amber" | "rose" | "slate" | "cyan";
 
 const tones: Record<ToolTone, { chip: string; border: string; title: string; num: string }> = {
   purple:  { chip: "bg-purple-100 text-purple-700",   border: "hover:border-purple-300",   title: "group-hover:text-purple-800", num: "text-purple-100" },
@@ -10,6 +10,7 @@ const tones: Record<ToolTone, { chip: string; border: string; title: string; num
   amber:   { chip: "bg-amber-100 text-amber-700",     border: "hover:border-amber-300",    title: "group-hover:text-amber-800",  num: "text-amber-100" },
   rose:    { chip: "bg-rose-100 text-rose-700",       border: "hover:border-rose-300",     title: "group-hover:text-rose-800",   num: "text-rose-100" },
   slate:   { chip: "bg-stone-200 text-stone-700",     border: "hover:border-stone-300",    title: "group-hover:text-stone-900",  num: "text-stone-200" },
+  cyan:    { chip: "bg-cyan-100 text-cyan-700",       border: "hover:border-cyan-300",     title: "group-hover:text-cyan-800",   num: "text-cyan-100" },
 };
 
 interface ToolCardProps {

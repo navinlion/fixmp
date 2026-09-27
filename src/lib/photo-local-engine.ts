@@ -19,11 +19,12 @@ import { createWorker } from "tesseract.js";
 import exifr from "exifr";
 import jsQR from "jsqr";
 import { analyzeUrlDeterministic } from "@/lib/link-checks";
+import { detectFace } from "@/lib/face-detector";
 import type { RedactionRegion } from "@/types/check";
 
 // ── Public types ───────────────────────────────────────────────
 
-export type DetectorSource = "local-model" | "local-ocr" | "local-qr" | "local-exif";
+export type DetectorSource = "local-model" | "local-ocr" | "local-qr" | "local-exif" | "local-face";
 export type DetectorStatus = "pass" | "error";
 
 export interface LocalFinding {
@@ -58,6 +59,7 @@ export interface LocalPhotoReport {
     text: DetectorResult;   // ML regions + OCR reading + classification
     qr: DetectorResult;
     metadata: DetectorResult;
+    face: DetectorResult;   // local face + landmark detection (client-side only)
   };
 }
 
@@ -717,10 +719,11 @@ export async function runLocalPhotoIntelligence(
   onProgress("Decoding image", 5);
   const probe = await fileToCanvas(file, 1600);
 
-  const [text, qr, metadata] = await Promise.all([
+  const [text, qr, metadata, face] = await Promise.all([
     detectText(file, onProgress),
     detectQr(file, onProgress),
     detectMetadata(file, onProgress),
+    detectFace(file, onProgress),
   ]);
 
   // BUGFIX: a QR code's high-contrast module grid can itself trigger the
@@ -734,7 +737,7 @@ export async function runLocalPhotoIntelligence(
   });
   const text2: DetectorResult = { ...text, findings: dedupedTextFindings };
 
-  const findings = [...dedupedTextFindings, ...qr.findings, ...metadata.findings];
+  const findings = [...dedupedTextFindings, ...qr.findings, ...metadata.findings, ...face.findings];
 
   return {
     fileName: file.name,
@@ -742,6 +745,6 @@ export async function runLocalPhotoIntelligence(
     height: probe.height,
     analyzedAt: new Date().toISOString(),
     findings,
-    detectors: { text: text2, qr, metadata },
+    detectors: { text: text2, qr, metadata, face },
   };
 }

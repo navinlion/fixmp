@@ -238,9 +238,9 @@ export default function LocalPhotoReport({ report, previewUrl, originalFile }: P
       {/* Scope disclosure — this pass only covers what's listed below */}
       <p className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-xs leading-relaxed text-stone-500">
         This on-device scan checks <strong>text/handwriting (OCR)</strong>,{" "}
-        <strong>QR codes</strong>, and <strong>GPS/EXIF metadata</strong>. It does not check faces,
-        reflections, background context, or documents beyond what OCR can read — run a Deep AI
-        Check for that.
+        <strong>QR codes</strong>, <strong>GPS/EXIF metadata</strong>, and{" "}
+        <strong>faces</strong>. It does not check reflections, background context, or documents
+        beyond what OCR can read — run a Deep AI Check for that.
       </p>
 
       {/* Findings (evidence map) */}
@@ -273,6 +273,7 @@ export default function LocalPhotoReport({ report, previewUrl, originalFile }: P
           <DetectorLine name="Text & handwriting regions (local model)" result={report.detectors.text} />
           <DetectorLine name="QR codes" result={report.detectors.qr} />
           <DetectorLine name="Metadata (EXIF/GPS)" result={report.detectors.metadata} />
+          <DetectorLine name="Faces (local model)" result={report.detectors.face} />
         </div>
         <p className="mt-3 text-xs leading-relaxed text-stone-400">
           “None detected” means the detector ran and found nothing. “Could not complete” means it

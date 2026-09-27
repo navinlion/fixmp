@@ -24,7 +24,7 @@ export interface VerdictFinding {
   count?: number;
   region?: RedactionRegion; // present when the finding is tied to a visible area
   // Stage 2.5 — local engine provenance (additive, backward compatible)
-  source?: "local-ocr" | "local-ink" | "local-qr" | "local-exif" | "ai";
+  source?: "local-ocr" | "local-ink" | "local-qr" | "local-exif" | "local-face" | "ai";
   detectionConfidence?: number; // is there something here? (detector-measured)
   readingConfidence?: number;   // how well was the content read? (OCR only)
 }
